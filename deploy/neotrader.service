@@ -1,0 +1,15 @@
+[Unit]
+Description=Kotak Neo Trading Engine
+After=network.target
+
+[Service]
+User=raviudal_udal
+WorkingDirectory=/home/raviudal_udal/neotrader
+ExecStart=/home/raviudal_udal/neotrader/venv/bin/python run.py
+Restart=always
+RestartSec=3
+Environment=PORT=8080
+Environment=HOST=0.0.0.0
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1337 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { 
+  Layers, Plus, Trash2, ArrowUpRight, ArrowDownRight, ShieldAlert, 
+  CheckCircle2, ChevronRight, Calendar, Sparkles, RefreshCw, Sliders,
+  TrendingUp, TrendingDown, Target, Info, Edit2, RotateCcw,
+  ChevronDown, ChevronUp, GripVertical, Calculator
+} from 'lucide-react';
+import { api } from '../services/api';
+import PayoffGraph from './PayoffGraph';
+
+const STRATEGY_PRESETS = [
+  { id: 'BULL_PUT_CREDIT', name: 'Bull Put Spread', type: 'Credit', bias: 'BULLISH', desc: 'Sell OTM Put + Buy deeper OTM Put hedge' },
+  { id: 'BEAR_CALL_CREDIT', name: 'Bear Call Spread', type: 'Credit', bias: 'BEARISH', desc: 'Sell OTM Call + Buy higher OTM Call hedge' },
+  { id: 'BULL_CALL_SPREAD', name: 'Bull Call Spread', type: 'Debit', bias: 'BULLISH', desc: 'Buy ATM Call + Sell higher OTM Call' },
+  { id: 'BEAR_PUT_SPREAD', name: 'Bear Put Spread', type: 'Debit', bias: 'BEARISH', desc: 'Buy ATM Put + Sell lower OTM Put' },
+  { id: 'CALENDAR_SPREAD', name: 'Calendar Spread', type: 'Time Spread', bias: 'NEUTRAL', desc: 'Sell Near Expiry + Buy Far Expiry' },
+  { id: 'IRON_CONDOR', name: 'Iron Condor', type: 'Credit', bias: 'NEUTRAL', desc: '4 Legs: OTM Put Spread + OTM Call Spread' },
+  { id: 'LONG_STRADDLE', name: 'Long Straddle', type: 'Debit', bias: 'VOLATILITY', desc: 'Buy ATM Call + Buy ATM Put' },
+  { id: 'SHORT_STRADDLE', name: 'Short Straddle', type: 'Credit', bias: 'NEUTRAL', desc: 'Sell ATM Call + Sell ATM Put' }
+];
+
+export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = null, onStrategyCreated }) {
+  const [strategyType, setStrategyType] = useState('BULL_PUT_CREDIT');
+  const [strategyName, setStrategyName] = useState('Bull Put Spread');
+  const [isNameManuallyEdited, setIsNameManuallyEdited] = useState(false);
+  const [lots, setLots] = useState(1);
+  const [lotSize, setLotSize] = useState(65);
+  const [expiries, setExpiries] = useState([]);
+  const [selectedExpiry, setSelectedExpiry] = useState('');
+  
+  // Collapsible Presets Section (Saves vertical space)
+  const [presetsOpen, setPresetsOpen] = useState(false);
+
+  // Sensibull-style interactive controls
+  const [mainStrike, setMainStrike] = useState(0);
+  const [hedgeDistance, setHedgeDistance] = useState(100);
+  
+  // Strategy legs & Payoff
+  const [legs, setLegs] = useState([]);
+  const [payoff, setPayoff] = useState({
+    max_profit: null,
+    max_loss: null,
+    breakevens: [],
+    breakeven_low: null,
+    breakeven_high: null,
+    risk_reward: 'N/A',
+    net_premium: 0,
+    payoff_curve: []
+  });
+
+  // Stop Loss & Execution: Choose between Nifty Index Spot SL and Strategy LTP Candle Close SL
+  const [slTargetType, setSlTargetType] = useState('STRATEGY_LTP'); // 'INDEX' | 'STRATEGY_LTP'
+  const [strategySLValue, setStrategySLValue] = useState('');
+  const [isStratSLManuallyEdited, setIsStratSLManuallyEdited] = useState(false);
+  const [slPercentage, setSlPercentage] = useState(5); // default 5%
+  const [indexSL, setIndexSL] = useState(0);
+  const [slCondition, setSlCondition] = useState('LESS_THAN_OR_EQUAL');
+  const [indexTarget, setIndexTarget] = useState('');
+  const [orderType, setOrderType] = useState('MKT');
+  const [indexSLMode, setIndexSLMode] = useState('CANDLE');
+  const [candleInterval, setCandleInterval] = useState(5);
+  
+  // UI states
+  const [loading, setLoading] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [orderResults, setOrderResults] = useState([]);
+
+  // Available strikes
+  const atmSpot = niftySpot ? Math.round(niftySpot / 50) * 50 : 25100;
+
+  // 1. Load Expiries on Mount
+  useEffect(() => {
+    api.getExpiries()
+      .then((data) => {
+        if (Array.isArray(data) && data.length > 0) {
+          setExpiries(data);
+          setSelectedExpiry(data[0].code);
+        }
+      })
+      .catch((err) => console.error("Error loading expiries:", err));
+  }, []);
+
+  // 2. Initialize Main Strike to ATM when spot arrives
+  useEffect(() => {
+    if (niftySpot) {
+      if (!mainStrike || Math.abs(mainStrike - atmSpot) > 500) {
+        setMainStrike(atmSpot);
+      }
+    }
+  }, [niftySpot, atmSpot]);
+
+  const isCustomizedRef = useRef(false);
+  const initializedRef = useRef(false);
+  const lastAtmRef = useRef(null);
+
+  // 3. Strategy Preview & Payoff Calculation for Presets
+  const refreshPreview = async (
+    type = strategyType, 
+    exp = selectedExpiry, 
+    lts = lots, 
+    strike = mainStrike, 
+    hedge = hedgeDistance
+  ) => {
+    if (!niftySpot) return;
+    setPreviewLoading(true);
+    try {
+      const res = await api.previewStrategy({
+        strategy_type: type,
+        expiry_code: exp || undefined,
+        main_strike: strike || atmSpot,
+        hedge_distance: hedge,
+        spread_width: hedge,
+        lots: lts,
+        spot_price: niftySpot
+      });
+
+      if (res && Array.isArray(res.legs)) {
+        setLegs(res.legs);
+        if (res.legs.length > 0 && res.legs[0].lot_size) {
+          setLotSize(res.legs[0].lot_size);
+        }
+
+        // Payoff metrics
+        setPayoff({
+          max_profit: res.max_profit,
+          max_loss: res.max_loss,
+          breakevens: res.breakevens || [],
+          breakeven_low: res.breakeven_low,
+          breakeven_high: res.breakeven_high,
+          risk_reward: res.risk_reward || 'N/A',
+          net_premium: res.net_premium || 0,
+          payoff_curve: res.payoff_curve || []
+        });
+
+        // Dynamic Sensibull-style auto strategy name based on used legs
+        if (!isNameManuallyEdited && res.strategy_name) {
+          setStrategyName(res.strategy_name);
+        }
+
+        // Sensible default Stop Loss based on current Nifty Spot (never breach upon entry)
+        const currentSpot = niftySpot || atmSpot;
+        if (type === 'BULL_PUT_CREDIT' || type === 'BULL_CALL_SPREAD') {
+          // Bullish strategy: SL triggers if Nifty falls below current market
+          setIndexSL(Math.round((currentSpot - 75) / 5) * 5);
+          setSlCondition('LESS_THAN_OR_EQUAL');
+        } else if (type === 'BEAR_CALL_CREDIT' || type === 'BEAR_PUT_SPREAD') {
+          // Bearish strategy: SL triggers if Nifty rises above current market
+          setIndexSL(Math.round((currentSpot + 75) / 5) * 5);
+          setSlCondition('GREATER_THAN_OR_EQUAL');
+        } else if (type === 'IRON_CONDOR') {
+          setIndexSL(Math.round((currentSpot - 120) / 5) * 5);
+          setSlCondition('LESS_THAN_OR_EQUAL');
+        } else {
+          setIndexSL(Math.round((currentSpot - 75) / 5) * 5);
+          setSlCondition('LESS_THAN_OR_EQUAL');
+        }
+      }
+    } catch (err) {
+      console.error("Preview error:", err);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  // Real-time recalculation when user customizes legs (strike, action, expiry, option type, delete)
+  const updateCustomLegsPreview = async (updatedLegs, lts = lots) => {
+    if (!niftySpot || !updatedLegs || updatedLegs.length === 0) return;
+    setPreviewLoading(true);
+    try {
+      const res = await api.previewStrategy({
+        strategy_type: strategyType,
+        expiry_code: selectedExpiry || undefined,
+        main_strike: mainStrike || atmSpot,
+        hedge_distance: hedgeDistance,
+        spread_width: hedgeDistance,
+        lots: lts,
+        spot_price: niftySpot,
+        custom_legs: updatedLegs
+      });
+
+      if (res && Array.isArray(res.legs)) {
+        setLegs(res.legs);
+        if (res.legs.length > 0 && res.legs[0].lot_size) {
+          setLotSize(res.legs[0].lot_size);
+        }
+
+        setPayoff({
+          max_profit: res.max_profit,
+          max_loss: res.max_loss,
+          breakevens: res.breakevens || [],
+          breakeven_low: res.breakeven_low,
+          breakeven_high: res.breakeven_high,
+          risk_reward: res.risk_reward || 'N/A',
+          net_premium: res.net_premium || 0,
+          payoff_curve: res.payoff_curve || []
+        });
+
+        if (!isNameManuallyEdited && res.strategy_name) {
+          setStrategyName(res.strategy_name);
+        }
+      }
+    } catch (err) {
+      console.error("Custom legs preview error:", err);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  // Initial load when spot and expiry are ready
+  useEffect(() => {
+    if (niftySpot && selectedExpiry && !initializedRef.current) {
+      initializedRef.current = true;
+      lastAtmRef.current = atmSpot;
+      refreshPreview(strategyType, selectedExpiry, lots, mainStrike || atmSpot, hedgeDistance);
+    }
+  }, [niftySpot, selectedExpiry]);
+
+  // When strategyType or selectedExpiry changes after initial load
+  useEffect(() => {
+    if (initializedRef.current && selectedExpiry && niftySpot) {
+      if (isCustomizedRef.current && legs && legs.length > 0) {
+        updateCustomLegsPreview(legs);
+      } else {
+        refreshPreview(strategyType, selectedExpiry, lots, mainStrike, hedgeDistance);
+      }
+    }
+  }, [strategyType, selectedExpiry]);
+
+  // Tell backend WebSocket to monitor these preview legs via Kotak Neo
+  useEffect(() => {
+    if (wsClient && typeof wsClient.send === 'function' && legs && legs.length > 0) {
+      const legsToWatch = legs.map(l => ({
+        trading_symbol: l.trading_symbol,
+        token: l.token,
+        strike: l.strike,
+        option_type: l.option_type,
+        exchange_segment: l.exchange_segment || 'nse_fo'
+      }));
+      wsClient.send({
+        type: 'WATCH_LEGS',
+        legs: legsToWatch
+      });
+    }
+  }, [legs, wsClient]);
+
+  // Real-time WebSocket streaming of leg prices into Strategy Builder
+  useEffect(() => {
+    if (!ltpCache || Object.keys(ltpCache).length === 0 || !legs || legs.length === 0) return;
+
+    let hasUpdate = false;
+    const updatedLegs = legs.map(leg => {
+      // Don't overwrite if user deliberately typed a custom price
+      if (leg.is_custom_price) return leg;
+
+      const liveLtp = ltpCache[leg.trading_symbol] ?? (leg.token ? ltpCache[leg.token] : undefined);
+      if (liveLtp !== undefined && liveLtp !== null && Number(liveLtp) > 0) {
+        const numLtp = Number(liveLtp);
+        if (leg.price !== numLtp) {
+          hasUpdate = true;
+          return {
+            ...leg,
+            price: numLtp,
+            entry_price: numLtp
+          };
+        }
+      }
+      return leg;
+    });
+
+    if (hasUpdate) {
+      setLegs(updatedLegs);
+
+      // Recalculate net premium immediately
+      let netPrem = 0;
+      for (const l of updatedLegs) {
+        const act = (l.action || 'BUY').toUpperCase();
+        const p = Number(l.price || 0);
+        const q = Number(l.quantity || (lots * (l.lot_size || lotSize || 65)));
+        if (act.startsWith('B')) {
+          netPrem -= p * q;
+        } else {
+          netPrem += p * q;
+        }
+      }
+
+      setPayoff(prev => ({
+        ...prev,
+        net_premium: netPrem
+      }));
+    }
+  }, [ltpCache, lots, lotSize]);
+
+  // Handle Preset Selection
+  const handlePresetChange = (presetId) => {
+    isCustomizedRef.current = false;
+    setStrategyType(presetId);
+    setIsNameManuallyEdited(false);
+    setIsStratSLManuallyEdited(false);
+    refreshPreview(presetId, selectedExpiry, lots, mainStrike, hedgeDistance);
+  };
+
+  // Shift all strikes up or down by delta (50 pts) - Sensibull Shift
+  const handleShiftAllLegs = (delta) => {
+    const newAnchor = Math.round((mainStrike + delta) / 50) * 50;
+    setMainStrike(newAnchor);
+    setIsNameManuallyEdited(false);
+    if (legs && legs.length > 0) {
+      const updated = legs.map(l => {
+        const copy = {
+          ...l,
+          strike: Math.round(((parseFloat(l.strike) || newAnchor) + delta) / 50) * 50,
+          is_custom_price: false
+        };
+        delete copy.price;
+        delete copy.entry_price;
+        return copy;
+      });
+      setLegs(updated);
+      updateCustomLegsPreview(updated);
+    }
+  };
+
+  // Adjust Hedge Distance with +/- 50 pts
+  const handleShiftHedge = (delta) => {
+    const newHedge = Math.max(50, hedgeDistance + delta);
+    setHedgeDistance(newHedge);
+    setIsNameManuallyEdited(false);
+    isCustomizedRef.current = false;
+    refreshPreview(strategyType, selectedExpiry, lots, mainStrike, newHedge);
+  };
+
+  // Step an individual leg's strike by +/- 50 pts (Immediate real-time recalculation)
+  const handleStepLegStrike = (index, delta) => {
+    isCustomizedRef.current = true;
+    const updated = [...legs];
+    const curStrike = parseFloat(updated[index].strike) || atmSpot;
+    updated[index].strike = Math.round((curStrike + delta) / 50) * 50;
+    updated[index].is_custom_price = false;
+    delete updated[index].price;
+    delete updated[index].entry_price;
+    setLegs(updated);
+    setIsNameManuallyEdited(false);
+    updateCustomLegsPreview(updated);
+  };
+
+  // Toggle Buy/Sell action on a leg (Immediate real-time recalculation)
+  const handleToggleLegAction = (index) => {
+    isCustomizedRef.current = true;
+    const updated = [...legs];
+    const curAction = (updated[index].action || 'BUY').toUpperCase();
+    updated[index].action = curAction.startsWith('B') ? 'SELL' : 'BUY';
+    setLegs(updated);
+    setIsNameManuallyEdited(false);
+    updateCustomLegsPreview(updated);
+  };
+
+  // Toggle CE / PE on a leg (Immediate real-time recalculation)
+  const handleToggleLegOptionType = (index) => {
+    isCustomizedRef.current = true;
+    const updated = [...legs];
+    const curOpt = (updated[index].option_type || 'CE').toUpperCase();
+    updated[index].option_type = curOpt === 'CE' ? 'PE' : 'CE';
+    updated[index].is_custom_price = false;
+    delete updated[index].price;
+    delete updated[index].entry_price;
+    setLegs(updated);
+    setIsNameManuallyEdited(false);
+    updateCustomLegsPreview(updated);
+  };
+
+  // Change individual leg expiry (Immediate real-time recalculation)
+  const handleLegExpiryChange = (index, newExpiry) => {
+    isCustomizedRef.current = true;
+    const updated = [...legs];
+    updated[index].expiry = newExpiry;
+    updated[index].is_custom_price = false;
+    delete updated[index].price;
+    delete updated[index].entry_price;
+    setLegs(updated);
+    setIsNameManuallyEdited(false);
+    updateCustomLegsPreview(updated);
+  };
+
+  // Change individual leg price manually (for what-if testing)
+  const handleLegPriceChange = (index, newPrice) => {
+    isCustomizedRef.current = true;
+    const updated = [...legs];
+    updated[index].price = newPrice;
+    updated[index].entry_price = newPrice;
+    updated[index].is_custom_price = true;
+    setLegs(updated);
+    setIsNameManuallyEdited(false);
+    updateCustomLegsPreview(updated);
+  };
+
+  // Reset custom price back to real-time WebSocket live quote
+  const handleResetLegToLivePrice = (index) => {
+    const updated = [...legs];
+    updated[index].is_custom_price = false;
+    const liveLtp = ltpCache ? (ltpCache[updated[index].trading_symbol] ?? (updated[index].token ? ltpCache[updated[index].token] : null)) : null;
+    if (liveLtp && Number(liveLtp) > 0) {
+      updated[index].price = Number(liveLtp);
+      updated[index].entry_price = Number(liveLtp);
+    }
+    setLegs(updated);
+    updateCustomLegsPreview(updated);
+  };
+
+  // Delete a leg (Immediate real-time recalculation)
+  const handleDeleteLeg = (index) => {
+    if (legs.length <= 1) return;
+    isCustomizedRef.current = true;
+    const updated = legs.filter((_, i) => i !== index);
+    setLegs(updated);
+    setIsNameManuallyEdited(false);
+    updateCustomLegsPreview(updated);
+  };
+
+  // Multiplier / Lots change
+  const handleLotsChange = (newLts) => {
+    setLots(newLts);
+    if (isCustomizedRef.current && legs && legs.length > 0) {
+      const updated = legs.map(l => ({
+        ...l,
+        quantity: (l.lot_size || lotSize || 65) * newLts
+      }));
+      setLegs(updated);
+      updateCustomLegsPreview(updated, newLts);
+    } else {
+      refreshPreview(strategyType, selectedExpiry, newLts, mainStrike, hedgeDistance);
+    }
+  };
+
+  // Real-time Strategy Combined Net LTP: +1 for BUY leg and -1 for SELL leg
+  const currentStrategyLTP = useMemo(() => {
+    if (!legs || legs.length === 0) return 0;
+    let total = 0;
+    for (const leg of legs) {
+      const isBuy = (leg.action === 'BUY' || leg.action === 'B');
+      const p = parseFloat(leg.price || leg.entry_price || 0);
+      total += (isBuy ? 1 : -1) * p;
+    }
+    return Math.round(total * 100) / 100;
+  }, [legs]);
+
+  // Automatically prefill Strategy LTP Stop Loss by 5% (or selected percentage)
+  useEffect(() => {
+    if (currentStrategyLTP !== 0 && !isStratSLManuallyEdited) {
+      const adverse = (Math.abs(currentStrategyLTP) * slPercentage) / 100;
+      const autoSL = Math.round((currentStrategyLTP - adverse) * 100) / 100;
+      setStrategySLValue(autoSL);
+      setSlCondition('LESS_THAN_OR_EQUAL');
+    }
+  }, [currentStrategyLTP, slPercentage, isStratSLManuallyEdited]);
+
+  // Deploy Strategy
+  const handleDeploy = async (e) => {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+    setOrderResults([]);
+
+    if (slTargetType === 'STRATEGY_LTP') {
+      const parsedStratSL = parseFloat(strategySLValue);
+      if (isNaN(parsedStratSL)) {
+        setError('Please enter a valid Strategy LTP Stop Loss value.');
+        return;
+      }
+      if (slCondition === 'LESS_THAN_OR_EQUAL' && parsedStratSL >= currentStrategyLTP) {
+        setError(`Warning: For "≤" condition, Strategy Stop-Loss (₹${parsedStratSL}) is at or above current Strategy LTP (₹${currentStrategyLTP}). It would trigger an immediate exit on candle close.`);
+        return;
+      }
+      if (slCondition === 'GREATER_THAN_OR_EQUAL' && parsedStratSL <= currentStrategyLTP) {
+        setError(`Warning: For "≥" condition, Strategy Stop-Loss (₹${parsedStratSL}) is at or below current Strategy LTP (₹${currentStrategyLTP}). It would trigger an immediate exit on candle close.`);
+        return;
+      }
+    } else {
+      const currentSpot = niftySpot || atmSpot;
+      const parsedSL = parseFloat(indexSL);
+      if (parsedSL > 0) {
+        if (slCondition === 'LESS_THAN_OR_EQUAL' && parsedSL >= currentSpot) {
+          setError(`Cannot deploy: For "≤" condition, Stop-Loss (₹${parsedSL}) must be strictly below current Nifty Spot (₹${currentSpot.toFixed(1)}). Otherwise it would trigger an immediate exit.`);
+          return;
+        }
+        if (slCondition === 'GREATER_THAN_OR_EQUAL' && parsedSL <= currentSpot) {
+          setError(`Cannot deploy: For "≥" condition, Stop-Loss (₹${parsedSL}) must be strictly above current Nifty Spot (₹${currentSpot.toFixed(1)}). Otherwise it would trigger an immediate exit.`);
+          return;
+        }
+      }
+    }
+
+    setLoading(true);
+
+    try {
+      const payload = {
+        name: strategyName,
+        strategy_type: strategyType,
+        sl_target_type: slTargetType,
+        strategy_sl_value: slTargetType === 'STRATEGY_LTP' ? parseFloat(strategySLValue) : null,
+        index_sl_price: slTargetType === 'INDEX' ? parseFloat(indexSL) : 0,
+        index_sl_condition: slCondition,
+        index_sl_mode: slTargetType === 'STRATEGY_LTP' ? 'CANDLE' : indexSLMode,
+        candle_interval: (slTargetType === 'STRATEGY_LTP' || indexSLMode === 'CANDLE') ? (candleInterval || 5) : 0,
+        index_target_price: indexTarget ? parseFloat(indexTarget) : null,
+        expiry_code: selectedExpiry,
+        order_type: orderType,
+        max_profit: payoff.max_profit,
+        max_loss: payoff.max_loss,
+        breakeven_low: payoff.breakeven_low,
+        breakeven_high: payoff.breakeven_high,
+        risk_reward: payoff.risk_reward,
+        hedge_distance: hedgeDistance,
+        legs: legs.map(l => ({
+          trading_symbol: l.trading_symbol,
+          token: l.token,
+          strike: parseFloat(l.strike),
+          option_type: l.option_type,
+          action: l.action,
+          quantity: parseInt(l.quantity),
+          expiry: l.expiry || selectedExpiry,
+          entry_price: parseFloat(l.price || l.entry_price || 0.0),
+          order_type: orderType
+        }))
+      };
+
+      const res = await api.createStrategy(payload);
+      const slMsg = slTargetType === 'STRATEGY_LTP'
+        ? `Strategy LTP Candle Close SL @ ₹${res.strategy_sl_value ?? strategySLValue} (${candleInterval || 5}m)`
+        : `Index SL @ ${res.index_sl_price}`;
+      setSuccess(`Strategy "${res.name}" successfully placed on Kotak Neo with ${slMsg}!`);
+      if (res.execution && Array.isArray(res.execution)) {
+        setOrderResults(res.execution);
+      }
+      if (onStrategyCreated) onStrategyCreated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const distanceToSL = useMemo(() => {
+    if (slTargetType === 'STRATEGY_LTP') {
+      const target = parseFloat(strategySLValue);
+      if (isNaN(target)) return 0;
+      if (slCondition === 'GREATER_THAN_OR_EQUAL') {
+        return Math.round((target - currentStrategyLTP) * 100) / 100;
+      } else {
+        return Math.round((currentStrategyLTP - target) * 100) / 100;
+      }
+    } else {
+      if (!niftySpot || !indexSL) return 0;
+      return slCondition === 'LESS_THAN_OR_EQUAL'
+        ? Math.round((niftySpot - parseFloat(indexSL)) * 10) / 10
+        : Math.round((parseFloat(indexSL) - niftySpot) * 10) / 10;
+    }
+  }, [slTargetType, strategySLValue, currentStrategyLTP, slCondition, niftySpot, indexSL]);
+  const activePreset = STRATEGY_PRESETS.find(p => p.id === strategyType) || STRATEGY_PRESETS[0];
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-sm text-slate-800 space-y-4">
+      
+      {/* 1. Header with Expiry Selector & Compact Presets Toggle */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-3 border-b border-slate-200 gap-3">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold shadow-sm">
+            <Layers className="w-4 h-4" />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+              <span>Strategy Builder</span>
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                Sensibull Mode
+              </span>
+            </h3>
+            <p className="text-xs text-slate-500">Live Payoff • Multi-Leg Stepper • Index SL</p>
+          </div>
+        </div>
+
+        {/* Expiry Selector */}
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <Calendar className="w-4 h-4 text-slate-500 shrink-0" />
+          <select
+            value={selectedExpiry}
+            onChange={(e) => setSelectedExpiry(e.target.value)}
+            className="w-full sm:w-auto bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-sm cursor-pointer"
+          >
+            {expiries.map(exp => (
+              <option key={exp.code} value={exp.code} className="font-medium">
+                {exp.display}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* 2. Collapsible Predefined Strategy Bar (Saves vast vertical space) */}
+      <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+        <div 
+          onClick={() => setPresetsOpen(!presetsOpen)}
+          className="flex items-center justify-between cursor-pointer select-none"
+        >
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-slate-700">Predefined Strategy:</span>
+            <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full border shadow-sm ${
+              activePreset.bias === 'BULLISH' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+              activePreset.bias === 'BEARISH' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-blue-50 text-blue-700 border-blue-200'
+            }`}>
+              {activePreset.name} ({activePreset.type})
+            </span>
+          </div>
+
+          <button
+            type="button"
+            className="text-xs font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer"
+          >
+            <span>{presetsOpen ? 'Collapse' : 'Change Strategy'}</span>
+            {presetsOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+          </button>
+        </div>
+
+        {/* Expanded Presets Pill Grid */}
+        {presetsOpen && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-3 mt-2.5 border-t border-slate-200">
+            {STRATEGY_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => {
+                  handlePresetChange(preset.id);
+                  setPresetsOpen(false);
+                }}
+                className={`p-2 rounded-lg border text-left transition-all cursor-pointer ${
+                  strategyType === preset.id
+                    ? 'bg-blue-600 text-white border-blue-600 font-bold shadow-sm'
+                    : 'bg-white border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${
+                    strategyType === preset.id
+                      ? 'bg-blue-700 text-white border-blue-500'
+                      : (preset.bias === 'BULLISH' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                         preset.bias === 'BEARISH' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-slate-100 text-slate-600 border-slate-200')
+                  }`}>
+                    {preset.bias}
+                  </span>
+                </div>
+                <p className="font-semibold text-xs leading-tight">{preset.name}</p>
+                <span className={`text-[10px] block mt-0.5 ${strategyType === preset.id ? 'text-blue-100' : 'text-slate-500'}`}>
+                  {preset.type}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 3. Sensibull Table Format Legs & In-Line Controls (Matching media_1792297475883_92dbd06e.png) */}
+      <div className="border border-slate-200 rounded-lg overflow-hidden shadow-sm">
+        
+        {/* Table Header */}
+        <div className="grid grid-cols-12 gap-2 bg-slate-50 px-3 py-2 text-[11px] font-semibold text-slate-500 border-b border-slate-200">
+          <div className="col-span-1 flex items-center justify-center">B/S</div>
+          <div className="col-span-3 sm:col-span-2">Expiry</div>
+          <div className="col-span-4 sm:col-span-3 text-center">Strike</div>
+          <div className="col-span-1 text-center">Type</div>
+          <div className="col-span-1 text-center hidden sm:block">Lots</div>
+          <div className="col-span-2 text-right">Price</div>
+          <div className="col-span-1 text-right"></div>
+        </div>
+
+        {/* Legs Rows */}
+        <div className="divide-y divide-slate-100 bg-white">
+          {legs.map((leg, index) => {
+            const isBuy = (leg.action || 'BUY').toUpperCase() === 'BUY';
+            return (
+              <div 
+                key={index} 
+                className="grid grid-cols-12 gap-2 items-center px-3 py-2 text-xs hover:bg-slate-50/70 transition-colors"
+              >
+                {/* B/S Badge */}
+                <div className="col-span-1 flex items-center justify-center">
+                  <button
+                    type="button"
+                    onClick={() => handleToggleLegAction(index)}
+                    title="Click to toggle BUY / SELL"
+                    className={`w-11 py-1 rounded flex items-center justify-center font-bold text-[10px] tracking-wider transition-colors cursor-pointer shadow-xs ${
+                      isBuy ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-rose-600 text-white hover:bg-rose-700'
+                    }`}
+                  >
+                    {isBuy ? 'BUY' : 'SELL'}
+                  </button>
+                </div>
+
+                {/* Expiry Selector */}
+                <div className="col-span-3 sm:col-span-2">
+                  <select
+                    value={leg.expiry || selectedExpiry}
+                    onChange={(e) => handleLegExpiryChange(index, e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded px-1.5 py-1 text-[11px] font-medium text-slate-800 shadow-sm focus:outline-none cursor-pointer"
+                  >
+                    {expiries.map(exp => (
+                      <option key={exp.code} value={exp.code}>
+                        {exp.display.split(' ')[0]} {exp.display.split(' ')[1]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Strike Stepper: [-] [ 23150 ] [+] (Exact Sensibull Match) */}
+                <div className="col-span-4 sm:col-span-3 flex items-center justify-center">
+                  <div className="inline-flex items-center border border-slate-200 rounded bg-white shadow-sm overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => handleStepLegStrike(index, -50)}
+                      className="px-2 py-1 hover:bg-slate-100 text-slate-600 font-bold text-xs border-r border-slate-200 transition-colors cursor-pointer"
+                      title="-50 pts"
+                    >
+                      −
+                    </button>
+                    <span className="px-2.5 py-1 font-mono font-bold text-xs text-slate-800 min-w-[54px] text-center">
+                      {leg.strike}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleStepLegStrike(index, 50)}
+                      className="px-2 py-1 hover:bg-slate-100 text-slate-600 font-bold text-xs border-l border-slate-200 transition-colors cursor-pointer"
+                      title="+50 pts"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+
+                {/* Option Type CE / PE */}
+                <div className="col-span-1 flex items-center justify-center">
+                  <button
+                    type="button"
+                    onClick={() => handleToggleLegOptionType(index)}
+                    title="Click to toggle CE / PE"
+                    className="px-1.5 py-0.5 rounded text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 cursor-pointer transition-colors"
+                  >
+                    {leg.option_type}
+                  </button>
+                </div>
+
+                {/* Lots Dropdown */}
+                <div className="col-span-1 text-center hidden sm:block">
+                  <span className="font-mono text-xs font-semibold text-slate-700">
+                    {lots}
+                  </span>
+                </div>
+
+                {/* Price Display / Editable LTP */}
+                <div className="col-span-2 flex items-center justify-end">
+                  <div className={`inline-flex items-center justify-end bg-slate-50 hover:bg-white focus-within:bg-white border rounded px-1.5 py-0.5 shadow-xs transition-colors ${
+                    leg.is_custom_price ? 'border-amber-300 bg-amber-50/40' : 'border-slate-200 hover:border-slate-300 focus-within:border-blue-500'
+                  }`}>
+                    <span className="text-slate-400 font-sans text-[11px] mr-0.5">₹</span>
+                    <input
+                      type="number"
+                      step="0.05"
+                      value={leg.price !== undefined ? leg.price : (leg.entry_price || '')}
+                      onChange={(e) => handleLegPriceChange(index, parseFloat(e.target.value) || 0)}
+                      className="w-14 text-right bg-transparent font-mono text-xs font-bold text-slate-800 focus:outline-none"
+                      title="LTP Price (live WebSocket stream from Kotak Neo; click to edit or test what-if)"
+                    />
+                    {leg.is_custom_price ? (
+                      <button
+                        type="button"
+                        onClick={() => handleResetLegToLivePrice(index)}
+                        title="Custom price set. Click to reset to live WS quote."
+                        className="ml-1 text-[9px] text-amber-700 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded px-1 py-0 cursor-pointer font-bold uppercase"
+                      >
+                        live
+                      </button>
+                    ) : (
+                      <span className="ml-1 flex h-1.5 w-1.5 relative" title="Live streaming via WebSocket">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Delete / Actions */}
+                <div className="col-span-1 flex items-center justify-end">
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteLeg(index)}
+                    title="Delete Leg"
+                    className="p-1 text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* 4. In-Line Adjustment Controls Toolbar (Circled in user screenshot media_1792297475883_92dbd06e.png) */}
+        <div className="p-2.5 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+          
+          {/* Shift, Hedge & Multiplier in-line */}
+          <div className="flex flex-wrap items-center gap-3">
+            
+            {/* Shift Stepper (Circled in red in screenshot) */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-600 font-semibold">Shift</span>
+              <div className="inline-flex items-center border border-slate-300 rounded bg-white shadow-sm overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => handleShiftAllLegs(-50)}
+                  className="px-2.5 py-1 hover:bg-slate-100 text-slate-700 font-bold border-r border-slate-200 transition-colors cursor-pointer"
+                  title="Shift all strikes down by 50 pts"
+                >
+                  −
+                </button>
+                <span className="px-2.5 py-1 font-mono font-bold text-slate-800 text-[11px] min-w-[32px] text-center">
+                  −
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleShiftAllLegs(50)}
+                  className="px-2.5 py-1 hover:bg-slate-100 text-slate-700 font-bold border-l border-slate-200 transition-colors cursor-pointer"
+                  title="Shift all strikes up by 50 pts"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+
+            <div className="h-4 w-[1px] bg-slate-300 hidden sm:block"></div>
+
+            {/* Hedge Stepper (Circled in red in screenshot: Hedge [-] [ 200 ] [+]) */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-600 font-semibold">Hedge</span>
+              <div className="inline-flex items-center border border-slate-300 rounded bg-white shadow-sm overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => handleShiftHedge(-50)}
+                  className="px-2.5 py-1 hover:bg-slate-100 text-slate-700 font-bold border-r border-slate-200 transition-colors cursor-pointer"
+                  title="Decrease hedge width by 50 pts"
+                >
+                  −
+                </button>
+                <span className="px-3 py-1 font-mono font-bold text-slate-800 text-[11px] min-w-[38px] text-center">
+                  {hedgeDistance}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleShiftHedge(50)}
+                  className="px-2.5 py-1 hover:bg-slate-100 text-slate-700 font-bold border-l border-slate-200 transition-colors cursor-pointer"
+                  title="Increase hedge width by 50 pts"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+
+            <div className="h-4 w-[1px] bg-slate-300 hidden sm:block"></div>
+
+            {/* Multiplier (Lots Dropdown - Circled in red in screenshot) */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-600 font-semibold">Multiplier</span>
+              <select
+                value={lots}
+                onChange={(e) => handleLotsChange(Math.max(1, parseInt(e.target.value) || 1))}
+                className="bg-white border border-slate-300 rounded px-2 py-1 text-xs font-semibold text-slate-800 shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+              >
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20].map(m => (
+                  <option key={m} value={m}>
+                    {m} ({m * lotSize} Qty)
+                  </option>
+                ))}
+              </select>
+            </div>
+
+          </div>
+
+          {/* Right: Net Price & Net Premium Summary */}
+          <div className="flex items-center gap-4 text-xs font-mono ml-auto">
+            <div>
+              <span className="text-slate-500 font-sans text-[10px] block">Price</span>
+              <span className={`font-bold ${payoff.net_premium >= 0 ? 'text-emerald-600' : 'text-slate-800'}`}>
+                {payoff.net_premium >= 0 ? 'Receive ' : 'Pay '}
+                ₹{(Math.abs(payoff.net_premium) / (lots * lotSize || 65)).toFixed(1)}
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-500 font-sans text-[10px] block">Premium</span>
+              <span className={`font-bold ${payoff.net_premium >= 0 ? 'text-emerald-600' : 'text-slate-800'}`}>
+                {payoff.net_premium >= 0 ? 'Receive ' : 'Pay '}
+                ₹{Math.abs(Math.round(payoff.net_premium)).toLocaleString('en-IN')}
+              </span>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+      {/* 5. Sensibull Payoff Metrics Cards (Max Profit, Max Loss, Breakevens, Risk/Reward) */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono">
+        
+        {/* Max Profit */}
+        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Max Profit</span>
+          <span className="text-sm font-bold text-emerald-600 block mt-0.5">
+            {payoff.max_profit !== null ? `+₹${Math.round(payoff.max_profit).toLocaleString('en-IN')}` : 'Unlimited'}
+          </span>
+        </div>
+
+        {/* Max Loss */}
+        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Max Loss</span>
+          <span className="text-sm font-bold text-rose-600 block mt-0.5">
+            {payoff.max_loss !== null ? `-₹${Math.round(Math.abs(payoff.max_loss)).toLocaleString('en-IN')}` : 'Unlimited'}
+          </span>
+        </div>
+
+        {/* Breakeven(s) */}
+        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Breakeven(s)</span>
+          <span className="text-xs sm:text-sm font-bold text-slate-800 block mt-0.5 truncate" title={payoff.breakevens.length > 0 ? payoff.breakevens.map(b => Math.round(b)).join(' & ') : '—'}>
+            {payoff.breakevens.length > 0 ? payoff.breakevens.map(b => Math.round(b)).join(' & ') : '—'}
+          </span>
+        </div>
+
+        {/* Risk / Reward */}
+        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Risk / Reward</span>
+          <span className="text-sm font-bold text-slate-800 block mt-0.5">
+            {payoff.risk_reward}
+          </span>
+        </div>
+
+      </div>
+
+      {/* 6. Interactive Payoff Graph */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+            <TrendingUp className="w-3.5 h-3.5 text-blue-600" />
+            <span>Payoff Diagram at Expiry</span>
+          </label>
+          {previewLoading && <RefreshCw className="w-3 h-3 text-slate-500 animate-spin" />}
+        </div>
+
+        <PayoffGraph
+          curve={payoff.payoff_curve}
+          spotPrice={niftySpot || 25100}
+          breakevens={payoff.breakevens}
+          maxProfit={payoff.max_profit}
+          maxLoss={payoff.max_loss}
+        />
+      </div>
+
+      {/* 7. Alerts */}
+      {error && (
+        <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 font-medium text-xs">
+          {error}
+        </div>
+      )}
+      {success && (
+        <div className="p-3.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs space-y-2">
+          <div className="flex items-center gap-2 font-bold text-xs">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{success}</span>
+          </div>
+          {orderResults.length > 0 && (
+            <div className="pt-2 border-t border-emerald-200 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono">
+              {orderResults.map((ord, idx) => (
+                <div key={idx} className="p-2 bg-white rounded border border-emerald-200">
+                  <span className={ord.status === 'success' ? 'text-emerald-700 font-bold' : 'text-rose-600 font-bold'}>
+                    {ord.action} {ord.quantity}x {ord.trading_symbol}:
+                  </span>{' '}
+                  <span className="text-slate-800">{ord.message || (ord.order_id ? `Order #${ord.order_id}` : 'Processed')}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 8. Strategy Title, Stop Loss & Order Routing Form */}
+      <form onSubmit={handleDeploy} className="space-y-3.5 pt-1">
+        
+        {/* Dynamic Strategy Name */}
+        <div className="flex items-center gap-2">
+          <div className="flex-1 relative">
+            <input
+              type="text"
+              value={strategyName}
+              onChange={(e) => {
+                setStrategyName(e.target.value);
+                setIsNameManuallyEdited(true);
+              }}
+              required
+              placeholder="Strategy Title"
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-semibold text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+          </div>
+          {isNameManuallyEdited && (
+            <button
+              type="button"
+              onClick={() => {
+                setIsNameManuallyEdited(false);
+                refreshPreview();
+              }}
+              className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-[11px] font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-50 flex items-center gap-1 cursor-pointer"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>Reset Name</span>
+            </button>
+          )}
+        </div>
+
+        {/* Stop Loss Protection (Radio Button Selection: Nifty Index vs Strategy LTP) */}
+        <div className="p-3.5 rounded-lg bg-amber-50/70 border border-amber-200 space-y-3">
+          
+          {/* Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-amber-200/80">
+            <div className="flex items-center gap-1.5 text-slate-900 font-bold text-xs">
+              <ShieldAlert className="w-4 h-4 text-amber-600" />
+              <span>Stop Loss Mechanism (Choose One)</span>
+            </div>
+            {distanceToSL !== 0 && (
+              <span className="text-[11px] font-mono font-semibold text-slate-700 bg-white px-2 py-0.5 rounded border border-amber-200 self-start sm:self-auto">
+                Buffer: <strong>{Math.abs(distanceToSL)} {slTargetType === 'STRATEGY_LTP' ? '₹' : 'pts'}</strong>
+              </span>
+            )}
+          </div>
+
+          {/* Radio Switcher: User can select ONLY ONE mechanism */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label className={`flex items-center gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-all ${
+              slTargetType === 'INDEX'
+                ? 'bg-white border-blue-600 shadow-xs ring-1 ring-blue-600'
+                : 'bg-white/60 border-slate-200 hover:bg-white text-slate-600'
+            }`}>
+              <input
+                type="radio"
+                name="slTargetType"
+                value="INDEX"
+                checked={slTargetType === 'INDEX'}
+                onChange={() => setSlTargetType('INDEX')}
+                className="w-4 h-4 text-blue-600 cursor-pointer"
+              />
+              <div>
+                <span className="block text-xs font-bold text-slate-900">Nifty Index Spot SL</span>
+                <span className="block text-[10px] text-slate-500">Track Nifty 50 Index (Live tick or candle close)</span>
+              </div>
+            </label>
+
+            <label className={`flex items-center gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-all ${
+              slTargetType === 'STRATEGY_LTP'
+                ? 'bg-white border-blue-600 shadow-xs ring-1 ring-blue-600'
+                : 'bg-white/60 border-slate-200 hover:bg-white text-slate-600'
+            }`}>
+              <input
+                type="radio"
+                name="slTargetType"
+                value="STRATEGY_LTP"
+                checked={slTargetType === 'STRATEGY_LTP'}
+                onChange={() => {
+                  setSlTargetType('STRATEGY_LTP');
+                  if (!candleInterval || candleInterval === 0) setCandleInterval(5);
+                }}
+                className="w-4 h-4 text-blue-600 cursor-pointer"
+              />
+              <div>
+                <span className="block text-xs font-bold text-slate-900">Strategy LTP Candle Close SL</span>
+                <span className="block text-[10px] text-slate-500">Track Combined Net LTP (+1 BUY, -1 SELL)</span>
+              </div>
+            </label>
+          </div>
+
+          {/* Details for INDEX SL */}
+          {slTargetType === 'INDEX' && (
+            <div className="space-y-2.5 pt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                    SL Trigger Mode:
+                  </label>
+                  <select
+                    value={indexSLMode}
+                    onChange={(e) => {
+                      setIndexSLMode(e.target.value);
+                      if (e.target.value === 'LIVE') setCandleInterval(0);
+                      else if (candleInterval === 0) setCandleInterval(5);
+                    }}
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer"
+                  >
+                    <option value="LIVE">Live Tick (Instant)</option>
+                    <option value="CANDLE">Candle Close</option>
+                  </select>
+                </div>
+
+                {indexSLMode === 'CANDLE' && (
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                      Candle Timeframe:
+                    </label>
+                    <select
+                      value={candleInterval || 5}
+                      onChange={(e) => setCandleInterval(parseInt(e.target.value))}
+                      className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer"
+                    >
+                      <option value={1}>1 Minute</option>
+                      <option value={3}>3 Minutes</option>
+                      <option value={5}>5 Minutes</option>
+                      <option value={15}>15 Minutes</option>
+                      <option value={30}>30 Minutes</option>
+                      <option value={60}>60 Minutes</option>
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                    Square Off if Nifty Spot:
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={slCondition}
+                      onChange={(e) => setSlCondition(e.target.value)}
+                      className="bg-white border border-slate-300 rounded px-2 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer"
+                    >
+                      <option value="LESS_THAN_OR_EQUAL">≤ Falls Below</option>
+                      <option value="GREATER_THAN_OR_EQUAL">≥ Rises Above</option>
+                    </select>
+                    <input
+                      type="number"
+                      step="0.05"
+                      value={indexSL}
+                      onChange={(e) => setIndexSL(e.target.value)}
+                      required={slTargetType === 'INDEX'}
+                      placeholder="e.g. 25050"
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono font-bold text-rose-600 focus:outline-none focus:ring-1 focus:ring-rose-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                    Target Level (Optional):
+                  </label>
+                  <input
+                    type="number"
+                    step="0.05"
+                    value={indexTarget}
+                    onChange={(e) => setIndexTarget(e.target.value)}
+                    placeholder="Optional Target Index Level"
+                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono font-bold text-emerald-600 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Details for STRATEGY_LTP SL */}
+          {slTargetType === 'STRATEGY_LTP' && (
+            <div className="space-y-2.5 pt-1">
+              {/* Strategy LTP Live Indicator Box */}
+              <div className="p-2.5 bg-white rounded-lg border border-amber-300/80 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-bold text-slate-700">Current Strategy Net LTP:</span>
+                  <span className={`text-sm font-mono font-bold px-2 py-0.5 rounded ${
+                    currentStrategyLTP >= 0 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-rose-50 text-rose-700 border border-rose-200'
+                  }`}>
+                    {currentStrategyLTP >= 0 ? '+' : ''}₹{currentStrategyLTP.toFixed(2)}
+                  </span>
+                </div>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  Formula: Σ (+1 BUY, -1 SELL) × Leg LTP
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                    Candle Close Timeframe:
+                  </label>
+                  <select
+                    value={candleInterval || 5}
+                    onChange={(e) => setCandleInterval(parseInt(e.target.value))}
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer"
+                  >
+                    <option value={1}>1 Minute</option>
+                    <option value={3}>3 Minutes</option>
+                    <option value={5}>5 Minutes</option>
+                    <option value={15}>15 Minutes</option>
+                    <option value={30}>30 Minutes</option>
+                    <option value={60}>60 Minutes</option>
+                  </select>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[11px] font-medium text-slate-700">
+                      Square Off if Strategy LTP:
+                    </label>
+                    <span className="text-[10px] font-semibold text-blue-600 bg-blue-50 px-1.5 py-0.2 rounded border border-blue-200">
+                      {!isStratSLManuallyEdited ? `${slPercentage}% Prefilled` : 'Custom SL'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={slCondition}
+                      onChange={(e) => setSlCondition(e.target.value)}
+                      className="bg-white border border-slate-300 rounded px-2 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer"
+                    >
+                      <option value="LESS_THAN_OR_EQUAL">≤ Falls Below</option>
+                      <option value="GREATER_THAN_OR_EQUAL">≥ Rises Above</option>
+                    </select>
+                    <input
+                      type="number"
+                      step="0.05"
+                      value={strategySLValue}
+                      onChange={(e) => {
+                        setStrategySLValue(e.target.value);
+                        setIsStratSLManuallyEdited(true);
+                      }}
+                      required={slTargetType === 'STRATEGY_LTP'}
+                      placeholder="e.g. -120 or 50"
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono font-bold text-rose-600 focus:outline-none focus:ring-1 focus:ring-rose-500"
+                    />
+                  </div>
+
+                  {/* Quick % SL Prefill Selector */}
+                  <div className="flex items-center gap-1.5 mt-2">
+                    <span className="text-[10px] text-slate-500 font-semibold">Quick SL:</span>
+                    {[5, 10, 15, 20].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => {
+                          setSlPercentage(pct);
+                          setIsStratSLManuallyEdited(false);
+                          if (currentStrategyLTP !== 0) {
+                            const adverse = (Math.abs(currentStrategyLTP) * pct) / 100;
+                            const autoSL = Math.round((currentStrategyLTP - adverse) * 100) / 100;
+                            setStrategySLValue(autoSL);
+                            setSlCondition('LESS_THAN_OR_EQUAL');
+                          }
+                        }}
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold border transition-all cursor-pointer ${
+                          slPercentage === pct && !isStratSLManuallyEdited
+                            ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                            : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                        }`}
+                      >
+                        {pct}%{pct === 5 ? ' (Default)' : ''}
+                      </button>
+                    ))}
+                    {isStratSLManuallyEdited && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsStratSLManuallyEdited(false);
+                          setSlPercentage(5);
+                          if (currentStrategyLTP !== 0) {
+                            const adverse = (Math.abs(currentStrategyLTP) * 5) / 100;
+                            const autoSL = Math.round((currentStrategyLTP - adverse) * 100) / 100;
+                            setStrategySLValue(autoSL);
+                            setSlCondition('LESS_THAN_OR_EQUAL');
+                          }
+                        }}
+                        className="text-[10px] text-blue-600 hover:underline font-semibold ml-1 cursor-pointer"
+                      >
+                        Reset (5%)
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+
+        {/* Order Execution Settings (Limit vs Market) */}
+        <div className="flex items-center justify-between p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-xs">
+          <span className="font-semibold text-slate-700">Order Routing</span>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setOrderType('MKT')}
+              className={`px-3 py-1 rounded text-xs font-semibold transition-all cursor-pointer ${
+                orderType === 'MKT'
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              Market (MKT)
+            </button>
+            <button
+              type="button"
+              onClick={() => setOrderType('L')}
+              className={`px-3 py-1 rounded text-xs font-semibold transition-all cursor-pointer ${
+                orderType === 'L'
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              Limit (LTP)
+            </button>
+          </div>
+        </div>
+
+        {/* Submit Deploy Button (Sensibull Blue) */}
+        <button
+          type="submit"
+          disabled={loading || legs.length === 0}
+          className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold text-xs uppercase tracking-wide rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer"
+        >
+          {loading ? (
+            <span>Placing Orders on Kotak Neo...</span>
+          ) : (
+            <>
+              <span>Deploy Strategy & Place Real Orders on Kotak Neo</span>
+              <ChevronRight className="w-4 h-4" />
+            </>
+          )}
+        </button>
+      </form>
+    </div>
+  );
+}

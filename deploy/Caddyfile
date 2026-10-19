@@ -1,0 +1,7 @@
+# Replace your-domain.com with your domain name or public IP (e.g., 34.123.45.67.nip.io)
+# Caddy automatically provisions free SSL/TLS certificates via Let's Encrypt!
+
+your-domain.com {
+    # Reverse proxy to NeoTrader backend with WebSocket support
+    reverse_proxy 127.0.0.1:8080
+}

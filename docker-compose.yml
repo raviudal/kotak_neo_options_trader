@@ -1,0 +1,18 @@
+services:
+  neotrader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: neotrader
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - HOST=0.0.0.0
+      - KOTAK_ENV=prod
+      - ADMIN_SEED=true
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data

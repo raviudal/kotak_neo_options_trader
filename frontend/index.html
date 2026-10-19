@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>NEOTRADER PRO | Kotak Neo Options Terminal</title>
+    <!-- Tab Favicon / Logo -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['"Plus Jakarta Sans"', 'Inter', 'system-ui', 'sans-serif'],
+              mono: ['JetBrains Mono', 'monospace'],
+            },
+            colors: {
+              gum: {
+                bg: '#f4f4f0',
+                card: '#ffffff',
+                border: '#000000',
+                pink: '#ff90e8',
+                yellow: '#ffc900',
+                cyan: '#90e8ff',
+                green: '#23a094',
+                purple: '#b8a9ff',
+                dark: '#000000',
+                muted: '#525252'
+              },
+              trading: {
+                bg: '#f4f4f0',
+                card: '#ffffff',
+                hover: '#fbfbf9',
+                border: '#000000',
+                green: '#059669',
+                red: '#e11d48',
+                cyan: '#0284c7',
+                amber: '#d97706',
+                muted: '#525252',
+              }
+            },
+            boxShadow: {
+              'gum': '3px 3px 0px 0px #000000',
+              'gum-lg': '5px 5px 0px 0px #000000',
+              'gum-sm': '2px 2px 0px 0px #000000',
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      body {
+        background-color: #f4f4f0;
+        color: #000000;
+        font-family: '"Plus Jakarta Sans"', 'Inter', sans-serif;
+      }
+      /* Custom scrollbars */
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #f4f4f0;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #000000;
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #333333;
+      }
+    </style>
+  </head>
+  <body class="bg-[#f4f4f0] text-black min-h-screen antialiased selection:bg-[#ff90e8] selection:text-black">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

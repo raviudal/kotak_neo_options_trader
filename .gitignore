@@ -1,0 +1,72 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments & Virtualenvs
+.env
+.env.local
+.env.*.local
+venv/
+.venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+var/
+sdist/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Database & SQLite files
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.sqlite
+data/*.sqlite3
+data/*.csv
+data/quant_pilot.db
+!data/.gitkeep
+
+# Node & Frontend build
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Deploy & Secret archives
+deploy_archive.tar.gz
+*.tar.gz
+*.key
+*.pem
+id_rsa*
+gcp_key*
+
+# Testing & Caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
