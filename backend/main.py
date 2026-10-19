@@ -19,7 +19,10 @@ from backend.auth import (
 )
 from backend.kotak_service import KotakNeoManager
 from backend.market_engine import MarketEngine
-from backend.config import BASE_DIR, DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD, ADMIN_SEED
+from backend.config import (
+    BASE_DIR, DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD, ADMIN_SEED,
+    REGISTRATION_ENABLED, MAX_USERS
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("main")
@@ -151,8 +154,36 @@ class SingleOrderRequest(BaseModel):
 
 # --- Authentication Endpoints ---
 
+@app.get("/api/auth/registration-status")
+def get_registration_status():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        user_count = cursor.fetchone()[0]
+    return {
+        "registration_enabled": REGISTRATION_ENABLED and (user_count < MAX_USERS),
+        "user_count": user_count,
+        "max_users": MAX_USERS
+    }
+
 @app.post("/api/auth/register")
 def register_user(req: RegisterRequest):
+    if not REGISTRATION_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Public registration is disabled by the administrator. Contact host."
+        )
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        user_count = cursor.fetchone()[0]
+        if user_count >= MAX_USERS:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Registration limit reached ({MAX_USERS} users max)."
+            )
+
     uname = req.username.strip()
     if len(uname) < 3:
         raise HTTPException(status_code=400, detail="Username must be at least 3 characters long")

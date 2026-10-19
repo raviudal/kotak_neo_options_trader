@@ -8,8 +8,10 @@ WorkingDirectory=/home/raviudal_udal/neotrader
 ExecStart=/home/raviudal_udal/neotrader/venv/bin/python run.py
 Restart=always
 RestartSec=3
-Environment=PORT=8080
-Environment=HOST=0.0.0.0
+Environment=PORT=8000
+Environment=HOST=127.0.0.1
+Environment=REGISTRATION_ENABLED=false
+EnvironmentFile=-/home/raviudal_udal/neotrader/.env
 
 [Install]
 WantedBy=multi-user.target

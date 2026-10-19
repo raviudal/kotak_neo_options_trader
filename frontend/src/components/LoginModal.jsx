@@ -15,6 +15,18 @@ export default function LoginModal({ onLoginSuccess }) {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [registrationEnabled, setRegistrationEnabled] = useState(false);
+
+  React.useEffect(() => {
+    fetch(`${window.location.origin}/api/auth/registration-status`)
+      .then(res => res.json())
+      .then(data => {
+        if (data && typeof data.registration_enabled === 'boolean') {
+          setRegistrationEnabled(data.registration_enabled);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const handleFillDemo = () => {
     setUsername('trader');
@@ -103,8 +115,8 @@ export default function LoginModal({ onLoginSuccess }) {
           </p>
         </div>
 
-        {/* Tab Switcher (Only if not in 2FA onboarding mode) */}
-        {!registrationData && (
+        {/* Tab Switcher (Only if registration is enabled and not in 2FA onboarding mode) */}
+        {!registrationData && registrationEnabled && (
           <div className="flex bg-[#f4f4f0] border-2 border-black p-1 rounded-xl mb-5 shadow-[2px_2px_0px_0px_#000]">
             <button
               type="button"

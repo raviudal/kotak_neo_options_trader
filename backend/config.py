@@ -24,3 +24,8 @@ DEFAULT_ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "TradeSafe@2026")
 KOTAK_CONSUMER_KEY = os.getenv("KOTAK_CONSUMER_KEY", "")
 KOTAK_MOBILE_NUMBER = os.getenv("KOTAK_MOBILE_NUMBER", "")
 KOTAK_UCC = os.getenv("KOTAK_UCC", "")
+
+# Registration Security Policy
+REGISTRATION_ENABLED = os.getenv("REGISTRATION_ENABLED", "false").lower() in ("true", "1", "yes")
+MAX_USERS = int(os.getenv("MAX_USERS", "5"))
+
