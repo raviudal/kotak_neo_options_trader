@@ -941,6 +941,44 @@ def emergency_close_strategy(strategy_id: int, user: dict = Depends(get_current_
         "results": results
     }
 
+@app.delete("/api/strategies/{strategy_id}")
+def delete_strategy(strategy_id: int, user: dict = Depends(get_current_user)):
+    """
+    Permanently deletes a strategy and its legs from the database and active memory.
+    Used for failed/stuck strategies or manual clearance.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM strategies WHERE id = ? AND user_id = ?", (strategy_id, user["id"]))
+        strat = cursor.fetchone()
+        if not strat:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        
+        strat_name = strat["name"]
+        cursor.execute("DELETE FROM strategy_legs WHERE strategy_id = ?", (strategy_id,))
+        cursor.execute("DELETE FROM strategies WHERE id = ? AND user_id = ?", (strategy_id, user["id"]))
+        
+        cursor.execute("""
+            INSERT INTO activity_logs (user_id, strategy_id, log_level, message, details)
+            VALUES (?, ?, 'WARNING', ?, ?)
+        """, (
+            user["id"],
+            strategy_id,
+            f"Strategy #{strategy_id} ('{strat_name}') permanently deleted.",
+            json.dumps({"deleted_at": datetime.now().isoformat(), "strategy_id": strategy_id, "name": strat_name})
+        ))
+        conn.commit()
+
+    # Remove from active engine memory if currently active
+    market_engine.active_strategies.pop(strategy_id, None)
+    market_engine.reload_active_strategies()
+    logger.info(f"Strategy #{strategy_id} permanently deleted by user {user['id']}")
+
+    return {
+        "status": "success",
+        "message": f"Strategy #{strategy_id} ('{strat_name}') deleted successfully."
+    }
+
 # --- System Health & Live Resources Endpoint ---
 
 @app.get("/api/system/health")

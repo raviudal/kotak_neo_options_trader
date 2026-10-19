@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Activity, ShieldAlert, CheckCircle2, AlertOctagon, XCircle, ArrowUpRight, ArrowDownRight, Clock, ChevronDown, ChevronUp, RefreshCw, Edit2, Check, X } from 'lucide-react';
+import { Activity, ShieldAlert, CheckCircle2, AlertOctagon, XCircle, ArrowUpRight, ArrowDownRight, Clock, ChevronDown, ChevronUp, RefreshCw, Edit2, Check, X, Trash2, AlertTriangle, ArrowRight } from 'lucide-react';
 import { api } from '../services/api';
 
 export default function ActivePositions({ liveStrategies, historicalStrategies, ltpCache = {}, onRefresh }) {
@@ -148,6 +148,40 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
       alert("Error syncing fill prices: " + e.message);
     } finally {
       setSyncingId(null);
+    }
+  };
+
+  // 2-Level Strategy Delete State & Handlers
+  const [deleteModalState, setDeleteModalState] = useState(null);
+
+  const handleInitiateDelete = (strat) => {
+    setDeleteModalState({
+      strat,
+      step: 1,
+      confirmText: '',
+      isDeleting: false
+    });
+  };
+
+  const handleProceedToLevel2 = () => {
+    setDeleteModalState(prev => prev ? { ...prev, step: 2, confirmText: '' } : null);
+  };
+
+  const handleCancelDelete = () => {
+    setDeleteModalState(null);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteModalState || !deleteModalState.strat) return;
+    const stratId = deleteModalState.strat.id;
+    setDeleteModalState(prev => ({ ...prev, isDeleting: true }));
+    try {
+      await api.deleteStrategy(stratId);
+      setDeleteModalState(null);
+      if (onRefresh) onRefresh();
+    } catch (e) {
+      alert("Error deleting strategy: " + (e.message || e));
+      setDeleteModalState(prev => prev ? ({ ...prev, isDeleting: false }) : null);
     }
   };
 
@@ -335,6 +369,15 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                       >
                         <AlertOctagon className="w-3.5 h-3.5 text-white" />
                         <span>{closingId === strat.id ? 'Exiting...' : 'Square Off'}</span>
+                      </button>
+
+                      {/* Delete Strategy Record Button */}
+                      <button
+                        onClick={() => handleInitiateDelete(strat)}
+                        title="Delete strategy record (Requires 2-level confirmation)"
+                        className="p-2 rounded-lg bg-slate-50 hover:bg-rose-50 border border-slate-200 hover:border-rose-300 text-slate-400 hover:text-rose-600 transition-all cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
                       </button>
 
                       {/* Expand Legs Chevron */}
@@ -761,17 +804,29 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                     </div>
 
                     {/* Realized PnL Display */}
-                    <div className="flex flex-col sm:items-end">
+                    {/* Realized PnL & Delete Action Display */}
+                    <div className="flex flex-col sm:items-end gap-1">
                       <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">Realized P&L</span>
-                      <div className={`inline-flex items-center gap-1 px-3 py-1 rounded-lg border font-mono font-extrabold text-sm sm:text-base ${
-                        isProfit 
-                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
-                          : isLoss 
-                          ? 'bg-rose-50 text-rose-700 border-rose-200' 
-                          : 'bg-slate-50 text-slate-700 border-slate-200'
-                      }`}>
-                        {isProfit ? <ArrowUpRight className="w-4 h-4 text-emerald-600" /> : isLoss ? <ArrowDownRight className="w-4 h-4 text-rose-600" /> : null}
-                        <span>{stratPnL >= 0 ? '+' : ''}₹{Number(stratPnL).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      <div className="flex items-center gap-2">
+                        <div className={`inline-flex items-center gap-1 px-3 py-1 rounded-lg border font-mono font-extrabold text-sm sm:text-base ${
+                          isProfit 
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                            : isLoss 
+                            ? 'bg-rose-50 text-rose-700 border-rose-200' 
+                            : 'bg-slate-50 text-slate-700 border-slate-200'
+                        }`}>
+                          {isProfit ? <ArrowUpRight className="w-4 h-4 text-emerald-600" /> : isLoss ? <ArrowDownRight className="w-4 h-4 text-rose-600" /> : null}
+                          <span>{stratPnL >= 0 ? '+' : ''}₹{Number(stratPnL).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        </div>
+
+                        {/* Delete Strategy History Record Button */}
+                        <button
+                          onClick={() => handleInitiateDelete(strat)}
+                          title="Permanently delete historical strategy record (Requires 2-level confirmation)"
+                          className="p-1.5 rounded-lg bg-slate-50 hover:bg-rose-50 border border-slate-200 hover:border-rose-300 text-slate-400 hover:text-rose-600 transition-all cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -873,6 +928,136 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
               );
             })
           )}
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* 2-LEVEL STRATEGY DELETION MODAL                                           */}
+      {/* ========================================================================= */}
+      {deleteModalState && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl border-2 border-black shadow-[6px_6px_0px_0px_#000] w-full max-w-md p-5 space-y-4">
+            
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-3 border-b-2 border-black">
+              <div className="flex items-center gap-2 text-rose-600 font-black text-sm uppercase tracking-wide">
+                <Trash2 className="w-5 h-5 shrink-0" />
+                <span>
+                  {deleteModalState.step === 1 ? "Confirm Delete (Step 1 of 2)" : "Final Confirmation (Step 2 of 2)"}
+                </span>
+              </div>
+              <button
+                onClick={handleCancelDelete}
+                disabled={deleteModalState.isDeleting}
+                className="p-1 rounded-lg hover:bg-slate-100 border border-transparent hover:border-black transition-all cursor-pointer"
+              >
+                <X className="w-4 h-4 text-slate-700" />
+              </button>
+            </div>
+
+            {/* Target Strategy Info Card */}
+            <div className="p-3 bg-amber-50/80 border-2 border-amber-300 rounded-xl text-xs space-y-1">
+              <div className="font-extrabold text-slate-900 text-sm flex items-center justify-between">
+                <span>#{deleteModalState.strat.id} {deleteModalState.strat.name}</span>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-white border border-amber-300 font-bold uppercase">
+                  {deleteModalState.strat.status}
+                </span>
+              </div>
+              <div className="text-slate-600 font-mono text-[11px] flex items-center gap-3">
+                <span>Type: {deleteModalState.strat.strategy_type}</span>
+                <span>Legs: {deleteModalState.strat.legs?.length || 0}</span>
+                <span>Created: {deleteModalState.strat.created_at?.split('T')[0] || '—'}</span>
+              </div>
+            </div>
+
+            {/* LEVEL 1: Intent Warning & Impact Explanation */}
+            {deleteModalState.step === 1 && (
+              <div className="space-y-4">
+                <div className="text-xs text-slate-700 space-y-2">
+                  <p className="font-semibold text-slate-900 text-sm">
+                    Are you sure you want to delete this strategy?
+                  </p>
+                  <p className="text-slate-600">
+                    This will permanently remove Strategy <strong className="text-black">#{deleteModalState.strat.id}</strong> and all of its legs from the database and terminal book.
+                  </p>
+                  <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11px] font-medium leading-relaxed">
+                    ⚠️ <strong>Important:</strong> If any legs are currently live or active on your Kotak Neo broker account, deleting the strategy here will <em>not</em> cancel them with the broker. Use <strong>"Square Off"</strong> first if you wish to exit broker positions.
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleCancelDelete}
+                    className="flex-1 py-2.5 px-4 rounded-xl border-2 border-black font-bold text-xs uppercase tracking-wider bg-slate-100 hover:bg-slate-200 text-slate-800 transition-all cursor-pointer shadow-[2px_2px_0px_0px_#000]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleProceedToLevel2}
+                    className="flex-1 py-2.5 px-4 rounded-xl border-2 border-black font-black text-xs uppercase tracking-wider bg-[#ffc900] hover:bg-[#ffb700] text-black transition-all cursor-pointer shadow-[2px_2px_0px_0px_#000] flex items-center justify-center gap-1.5"
+                  >
+                    <span>Proceed to Step 2</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* LEVEL 2: Strict Security Check - Type DELETE to Confirm */}
+            {deleteModalState.step === 2 && (
+              <div className="space-y-4">
+                <div className="space-y-2 text-xs">
+                  <p className="font-black text-rose-700 uppercase tracking-wide flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+                    Irreversible Confirmation
+                  </p>
+                  <p className="text-slate-700">
+                    To prevent accidental loss of data, please type <strong className="font-mono text-rose-700 bg-rose-50 px-1.5 py-0.5 rounded border border-rose-200">DELETE</strong> in the box below:
+                  </p>
+                  <input
+                    type="text"
+                    value={deleteModalState.confirmText || ''}
+                    onChange={(e) => setDeleteModalState(prev => ({ ...prev, confirmText: e.target.value }))}
+                    placeholder="Type DELETE to confirm"
+                    className="w-full px-3 py-2.5 border-2 border-black rounded-xl font-mono text-sm uppercase tracking-wider focus:outline-none focus:ring-2 focus:ring-rose-500 shadow-[2px_2px_0px_0px_#000]"
+                    autoFocus
+                  />
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setDeleteModalState(prev => ({ ...prev, step: 1, confirmText: '' }))}
+                    disabled={deleteModalState.isDeleting}
+                    className="flex-1 py-2.5 px-4 rounded-xl border-2 border-black font-bold text-xs uppercase tracking-wider bg-slate-100 hover:bg-slate-200 text-slate-800 transition-all cursor-pointer shadow-[2px_2px_0px_0px_#000]"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmDelete}
+                    disabled={deleteModalState.confirmText?.trim().toUpperCase() !== 'DELETE' || deleteModalState.isDeleting}
+                    className="flex-1 py-2.5 px-4 rounded-xl border-2 border-black font-black text-xs uppercase tracking-wider bg-rose-600 hover:bg-rose-700 text-white transition-all cursor-pointer shadow-[2px_2px_0px_0px_#000] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                  >
+                    {deleteModalState.isDeleting ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Deleting...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Permanently Delete</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+
+          </div>
         </div>
       )}
 

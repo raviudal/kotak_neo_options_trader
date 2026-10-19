@@ -71,6 +71,7 @@ export const api = {
   }),
   closeStrategy: (id) => apiRequest(`/api/strategies/${id}/close`, { method: "POST" }),
   syncStrategy: (id) => apiRequest(`/api/strategies/${id}/sync`, { method: "POST" }),
+  deleteStrategy: (id) => apiRequest(`/api/strategies/${id}`, { method: "DELETE" }),
   updateStrategySL: (id, payload) => apiRequest(`/api/strategies/${id}/sl`, {
     method: "PUT",
     body: JSON.stringify(payload)
