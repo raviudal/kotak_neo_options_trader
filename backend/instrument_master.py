@@ -778,14 +778,42 @@ class InstrumentMaster:
 
         # Risk to Reward ratio
         if max_profit is not None and max_loss is not None and max_profit > 0 and max_loss < 0:
-            ratio = abs(max_loss) / max_profit
-            risk_reward = f"1 : {ratio:.2f}"
+            if abs(max_loss) > max_profit:
+                ratio = abs(max_loss) / max_profit
+                risk_reward = f"{ratio:.2f} : 1"
+            else:
+                ratio = max_profit / abs(max_loss)
+                risk_reward = f"1 : {ratio:.2f}"
         elif max_profit is None:
             risk_reward = "1 : Unlimited"
         elif max_loss is None:
             risk_reward = "Unlimited Risk"
         else:
             risk_reward = "N/A"
+
+        # Margin Required Estimation (NSE SPAN + Exposure approximation)
+        sell_legs = [l for l in legs if str(l.get("action", "")).upper() == "SELL"]
+        buy_legs = [l for l in legs if str(l.get("action", "")).upper() == "BUY"]
+        total_buy_prem = sum(
+            float(l.get("price", 0)) * int(l.get("quantity", 65))
+            for l in buy_legs
+        )
+        total_qty = max([int(l.get("quantity", 65)) for l in legs], default=65)
+        num_lots = max(1, total_qty // 65)
+
+        if not sell_legs:
+            # Pure debit / long options: only total premium required
+            margin_required = max(0.0, total_buy_prem)
+        elif sell_legs and buy_legs and max_loss is not None and max_loss < 0:
+            # Defined-risk spread (e.g. Bull Put, Bear Call, Iron Condor)
+            # Exchange SPAN with hedge benefit: Max Loss + buffer (~₹18,000 per lot)
+            margin_required = max(abs(max_loss) + (18000.0 * num_lots), 28000.0 * num_lots)
+        elif sell_legs and not buy_legs:
+            # Naked short options: ~₹1,25,000 per lot on Nifty
+            mult = 1.4 if len(sell_legs) >= 2 else 1.0
+            margin_required = 125000.0 * num_lots * mult
+        else:
+            margin_required = abs(max_loss) + (20000.0 * num_lots) if max_loss else 45000.0 * num_lots
 
         return {
             "max_profit": max_profit,
@@ -794,16 +822,17 @@ class InstrumentMaster:
             "breakeven_high": be_high,
             "breakevens": cleaned_be,
             "risk_reward": risk_reward,
+            "margin_required": round(margin_required, 2),
             "net_premium": round(net_prem, 2),
             "payoff_curve": curve
         }
 
     def generate_strategy_name(self, strategy_type: str, legs: List[Dict[str, Any]]) -> str:
         """
-        Auto-generates clean Sensibull-style strategy names incorporating the exact leg strikes.
-        e.g. Bull Put Spread (25100 PE / 24900 PE)
-             Bear Call Spread (25200 CE / 25400 CE)
-             Iron Condor (24800 PE / 25000 PE / 25300 CE / 25500 CE)
+        Auto-generates clean Sensibull-style strategy names incorporating the exact leg strikes and expiry.
+        e.g. Bull Put Spread (25100 PE / 24900 PE) - 27-Oct-2026
+             Bear Call Spread (25200 CE / 25400 CE) - 27-Oct-2026
+             Iron Condor (24800 PE / 25000 PE / 25300 CE / 25500 CE) - 27-Oct-2026
         """
         if not legs:
             return "Nifty Strategy"
@@ -813,23 +842,41 @@ class InstrumentMaster:
         sorted_legs = sorted(legs, key=lambda l: (l.get("option_type", ""), float(l.get("strike", 0))))
         legs_desc = " / ".join(f"{int(l['strike'])} {l['option_type']}" for l in sorted_legs)
 
+        # Extract expiry
+        expiry_label = ""
+        for l in legs:
+            exp_code = l.get("expiry") or l.get("expiry_code")
+            if exp_code and exp_code in self.expiries:
+                expiry_label = self.expiries[exp_code].get("display", exp_code)
+                break
+            elif l.get("expiry_date"):
+                expiry_label = str(l.get("expiry_date"))
+                break
+            elif exp_code:
+                expiry_label = str(exp_code)
+                break
+
+        exp_suffix = f" - {expiry_label}" if expiry_label else ""
+
         if "BULL_PUT" in strat_type:
-            return f"Bull Put Spread ({legs_desc})"
+            base = f"Bull Put Spread ({legs_desc})"
         elif "BEAR_CALL" in strat_type:
-            return f"Bear Call Spread ({legs_desc})"
+            base = f"Bear Call Spread ({legs_desc})"
         elif "BULL_CALL" in strat_type:
-            return f"Bull Call Spread ({legs_desc})"
+            base = f"Bull Call Spread ({legs_desc})"
         elif "BEAR_PUT" in strat_type:
-            return f"Bear Put Spread ({legs_desc})"
+            base = f"Bear Put Spread ({legs_desc})"
         elif "CONDOR" in strat_type:
-            return f"Iron Condor ({legs_desc})"
+            base = f"Iron Condor ({legs_desc})"
         elif "LONG_STRADDLE" in strat_type:
-            return f"Long Straddle ({legs_desc})"
+            base = f"Long Straddle ({legs_desc})"
         elif "SHORT_STRADDLE" in strat_type:
-            return f"Short Straddle ({legs_desc})"
+            base = f"Short Straddle ({legs_desc})"
         elif "CALENDAR" in strat_type:
-            return f"Calendar Spread ({legs_desc})"
+            base = f"Calendar Spread ({legs_desc})"
         else:
             title = strategy_type.replace("_", " ").title()
-            return f"{title} ({legs_desc})"
+            base = f"{title} ({legs_desc})"
+
+        return f"{base}{exp_suffix}"
 

@@ -568,6 +568,7 @@ def preview_strategy(req: StrategyPreviewRequest, user: dict = Depends(get_curre
         "breakeven_high": payoff.get("breakeven_high"),
         "breakevens": payoff.get("breakevens", []),
         "risk_reward": payoff.get("risk_reward"),
+        "margin_required": payoff.get("margin_required"),
         "net_premium": payoff.get("net_premium"),
         "payoff_curve": payoff.get("payoff_curve", [])
     }

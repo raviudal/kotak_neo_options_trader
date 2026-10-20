@@ -3,7 +3,7 @@ import {
   Layers, Plus, Trash2, ArrowUpRight, ArrowDownRight, ShieldAlert, 
   CheckCircle2, ChevronRight, Calendar, Sparkles, RefreshCw, Sliders,
   TrendingUp, TrendingDown, Target, Info, Edit2, RotateCcw,
-  ChevronDown, ChevronUp, GripVertical, Calculator
+  ChevronDown, ChevronUp, GripVertical, Calculator, AlertTriangle, Wallet
 } from 'lucide-react';
 import { api } from '../services/api';
 import PayoffGraph from './PayoffGraph';
@@ -44,9 +44,14 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
     breakeven_low: null,
     breakeven_high: null,
     risk_reward: 'N/A',
+    margin_required: null,
     net_premium: 0,
     payoff_curve: []
   });
+
+  // Account Margin States
+  const [availableMargin, setAvailableMargin] = useState(null);
+  const [limitsLoading, setLimitsLoading] = useState(false);
 
   // Stop Loss & Execution: Choose between Nifty Index Spot SL and Strategy LTP Candle Close SL
   const [slTargetType, setSlTargetType] = useState('STRATEGY_LTP'); // 'INDEX' | 'STRATEGY_LTP'
@@ -71,16 +76,62 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
   // Available strikes
   const atmSpot = niftySpot ? Math.round(niftySpot / 50) * 50 : 25100;
 
-  // 1. Load Expiries on Mount
+  // Margin Required Calculation (NSE SPAN + Exposure rule approximation or backend metric)
+  const marginRequired = useMemo(() => {
+    if (payoff.margin_required !== null && payoff.margin_required !== undefined) {
+      return Number(payoff.margin_required);
+    }
+    const hasSell = legs.some(l => String(l.action).toUpperCase() === 'SELL');
+    const hasBuy = legs.some(l => String(l.action).toUpperCase() === 'BUY');
+    const totalBuyPrem = legs
+      .filter(l => String(l.action).toUpperCase() === 'BUY')
+      .reduce((sum, l) => sum + (parseFloat(l.price) || 0) * (parseInt(l.quantity) || lots * lotSize), 0);
+
+    if (!hasSell) return Math.max(0, totalBuyPrem);
+    if (hasSell && hasBuy && payoff.max_loss !== null && payoff.max_loss < 0) {
+      return Math.max(Math.abs(payoff.max_loss) + (18000 * lots), 28000 * lots);
+    }
+    if (hasSell && !hasBuy) {
+      const sellCount = legs.filter(l => String(l.action).toUpperCase() === 'SELL').length;
+      return 125000 * lots * (sellCount >= 2 ? 1.4 : 1.0);
+    }
+    return Math.abs(payoff.max_loss || 30000);
+  }, [payoff.margin_required, payoff.max_loss, legs, lots, lotSize]);
+
+  // Fetch Kotak Neo Available Limits
+  const fetchLimits = async () => {
+    try {
+      setLimitsLoading(true);
+      const data = await api.getKotakLimits();
+      if (data && !data.error) {
+        const val = data.available_margin ?? data.available_cash ?? null;
+        if (val !== null && !isNaN(Number(val))) {
+          setAvailableMargin(Number(val));
+        }
+      }
+    } catch (e) {
+      setAvailableMargin(null);
+    } finally {
+      setLimitsLoading(false);
+    }
+  };
+
+  // 1. Load Expiries and Limits on Mount
   useEffect(() => {
     api.getExpiries()
       .then((data) => {
         if (Array.isArray(data) && data.length > 0) {
           setExpiries(data);
           setSelectedExpiry(data[0].code);
+          if (!isNameManuallyEdited) {
+            const expDisplay = data[0].display || data[0].code;
+            setStrategyName(`Bull Put Spread - ${expDisplay}`);
+          }
         }
       })
       .catch((err) => console.error("Error loading expiries:", err));
+
+    fetchLimits();
   }, []);
 
   const handleRefreshMaster = async () => {
@@ -90,7 +141,9 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
       if (res && Array.isArray(res.expiries) && res.expiries.length > 0) {
         setExpiries(res.expiries);
         setSelectedExpiry(res.expiries[0].code);
+        setIsNameManuallyEdited(false);
       }
+      fetchLimits();
     } catch (e) {
       console.error("Error refreshing token master:", e);
     } finally {
@@ -146,6 +199,7 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
           breakeven_low: res.breakeven_low,
           breakeven_high: res.breakeven_high,
           risk_reward: res.risk_reward || 'N/A',
+          margin_required: res.margin_required ?? null,
           net_premium: res.net_premium || 0,
           payoff_curve: res.payoff_curve || []
         });
@@ -209,6 +263,7 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
           breakeven_low: res.breakeven_low,
           breakeven_high: res.breakeven_high,
           risk_reward: res.risk_reward || 'N/A',
+          margin_required: res.margin_required ?? null,
           net_premium: res.net_premium || 0,
           payoff_curve: res.payoff_curve || []
         });
@@ -507,6 +562,20 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
       }
     }
 
+    // Safeguard Check: Warn if available margin is insufficient
+    if (availableMargin !== null && availableMargin < marginRequired) {
+      const shortfall = Math.round(marginRequired - availableMargin);
+      const proceed = window.confirm(
+        `⚠️ INSUFFICIENT MARGIN WARNING\n\n` +
+        `Estimated Margin Required: ₹${Math.round(marginRequired).toLocaleString('en-IN')}\n` +
+        `Available Kotak Margin: ₹${Math.round(availableMargin).toLocaleString('en-IN')}\n` +
+        `Shortfall: ₹${shortfall.toLocaleString('en-IN')}\n\n` +
+        `Your Kotak Neo account does not have sufficient available funds. Order placement may be rejected by the exchange/broker.\n\n` +
+        `Do you still want to attempt placing these orders?`
+      );
+      if (!proceed) return;
+    }
+
     setLoading(true);
 
     try {
@@ -600,7 +669,10 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
           <Calendar className="w-4 h-4 text-slate-500 shrink-0" />
           <select
             value={selectedExpiry}
-            onChange={(e) => setSelectedExpiry(e.target.value)}
+            onChange={(e) => {
+              setSelectedExpiry(e.target.value);
+              setIsNameManuallyEdited(false);
+            }}
             className="w-full sm:w-auto bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-sm cursor-pointer"
           >
             {expiries.map(exp => (
@@ -907,13 +979,21 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
 
           </div>
 
-          {/* Right: Net Price & Net Premium Summary */}
-          <div className="flex items-center gap-4 text-xs font-mono ml-auto">
+          {/* Right: Net Margin & Net Premium Summary (Circled price removed) */}
+          <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs font-mono ml-auto">
             <div>
-              <span className="text-slate-500 font-sans text-[10px] block">Price</span>
-              <span className={`font-bold ${payoff.net_premium >= 0 ? 'text-emerald-600' : 'text-slate-800'}`}>
-                {payoff.net_premium >= 0 ? 'Receive ' : 'Pay '}
-                ₹{(Math.abs(payoff.net_premium) / (lots * lotSize || 65)).toFixed(1)}
+              <span className="text-slate-500 font-sans text-[10px] block">Margin Req</span>
+              <span className="font-bold text-slate-800">
+                ₹{Math.round(marginRequired).toLocaleString('en-IN')}
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-500 font-sans text-[10px] block">Avail Margin</span>
+              <span className={`font-bold ${
+                availableMargin === null ? 'text-slate-400' :
+                availableMargin < marginRequired ? 'text-rose-600 font-extrabold' : 'text-emerald-600'
+              }`}>
+                {availableMargin !== null ? `₹${Math.round(availableMargin).toLocaleString('en-IN')}` : '—'}
               </span>
             </div>
             <div>
@@ -929,8 +1009,8 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
 
       </div>
 
-      {/* 5. Sensibull Payoff Metrics Cards (Max Profit, Max Loss, Breakevens, Risk/Reward) */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono">
+      {/* 5. Sensibull Payoff & Margin Metrics Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 font-mono">
         
         {/* Max Profit */}
         <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
@@ -948,6 +1028,14 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
           </span>
         </div>
 
+        {/* Risk / Reward */}
+        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Risk / Reward</span>
+          <span className="text-sm font-bold text-slate-800 block mt-0.5">
+            {payoff.risk_reward}
+          </span>
+        </div>
+
         {/* Breakeven(s) */}
         <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
           <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Breakeven(s)</span>
@@ -956,11 +1044,37 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
           </span>
         </div>
 
-        {/* Risk / Reward */}
+        {/* Margin Required */}
         <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
-          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Risk / Reward</span>
+          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Margin Req</span>
           <span className="text-sm font-bold text-slate-800 block mt-0.5">
-            {payoff.risk_reward}
+            ₹{Math.round(marginRequired).toLocaleString('en-IN')}
+          </span>
+        </div>
+
+        {/* Available Margin */}
+        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Avail Margin</span>
+            <button
+              type="button"
+              onClick={fetchLimits}
+              disabled={limitsLoading}
+              title="Refresh Kotak available margin"
+              className="text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+            >
+              <RefreshCw className={`w-2.5 h-2.5 ${limitsLoading ? 'animate-spin text-blue-600' : ''}`} />
+            </button>
+          </div>
+          <span className={`text-xs sm:text-sm font-bold block mt-0.5 truncate ${
+            availableMargin === null ? 'text-slate-400 font-normal text-xs' :
+            availableMargin < marginRequired ? 'text-rose-600 font-extrabold' : 'text-emerald-600'
+          }`}>
+            {availableMargin !== null ? (
+              `₹${Math.round(availableMargin).toLocaleString('en-IN')}`
+            ) : (
+              'Login to Kotak'
+            )}
           </span>
         </div>
 
@@ -1340,6 +1454,24 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
             </button>
           </div>
         </div>
+
+        {/* Insufficient Margin Safeguard Alert Banner */}
+        {availableMargin !== null && availableMargin < marginRequired && (
+          <div className="flex items-start gap-2.5 p-3 rounded-lg bg-amber-50 border border-amber-300 text-amber-950 text-xs">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <div className="font-bold text-amber-900 flex items-center gap-1.5">
+                <span>Insufficient Margin Warning</span>
+                <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-100 text-rose-700 border border-rose-300 font-mono font-bold">
+                  Shortfall: ₹{Math.round(marginRequired - availableMargin).toLocaleString('en-IN')}
+                </span>
+              </div>
+              <div className="text-amber-800 leading-relaxed">
+                This strategy requires an estimated margin of <strong className="font-mono text-rose-700">₹{Math.round(marginRequired).toLocaleString('en-IN')}</strong>, but your available Kotak margin is <strong className="font-mono text-amber-900">₹{Math.round(availableMargin).toLocaleString('en-IN')}</strong>. Deploying may cause orders to be rejected by Kotak Neo.
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Submit Deploy Button (Sensibull Blue) */}
         <button

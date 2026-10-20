@@ -218,11 +218,11 @@ export default function PayoffGraph({
             clipPath="url(#loss-clip)"
           />
 
-          {/* Main P&L Curve */}
+          {/* Main P&L Curve - Distinct Royal Blue matching legend */}
           <polyline
             fill="none"
-            stroke="#000000"
-            strokeWidth="3"
+            stroke="#2563eb"
+            strokeWidth="3.5"
             strokeLinejoin="round"
             strokeLinecap="round"
             points={linePoints}

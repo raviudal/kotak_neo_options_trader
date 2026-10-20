@@ -383,12 +383,30 @@ class KotakNeoManager:
             r = requests.post(url, headers=self.get_auth_headers(), data=data, timeout=8)
             if r.status_code == 200:
                 res = r.json()
-                avail_cash = float(res.get("CollateralValue", 0)) + float(res.get("Collateral", 0))
+                net_avail = float(res.get("Net", 0) or 0)
+                cash_val = float(res.get("Cash", 0) or 0)
+                collateral_val = float(res.get("Collateral", 0) or 0)
+                collateral_value = float(res.get("CollateralValue", 0) or 0)
+                utilized = float(res.get("AmountUtilizedPrsnt", 0) or 0)
+
+                # Available margin: prefer Net if available, else Cash + Collateral, else CollateralValue
+                if net_avail > 0:
+                    avail_margin = net_avail
+                elif (cash_val + collateral_val) > 0:
+                    avail_margin = cash_val + collateral_val
+                elif collateral_value > 0:
+                    avail_margin = collateral_value
+                else:
+                    avail_margin = 0.0
+
                 return {
-                    "available_cash": avail_cash,
-                    "collateral": float(res.get("Collateral", 0)),
-                    "utilized_margin": float(res.get("AmountUtilizedPrsnt", 0)),
-                    "realized_pnl": float(res.get("RealizedMtomPrsnt", 0)),
+                    "available_margin": round(avail_margin, 2),
+                    "available_cash": round(avail_margin, 2),
+                    "net": net_avail,
+                    "cash": cash_val,
+                    "collateral": collateral_val,
+                    "utilized_margin": utilized,
+                    "realized_pnl": float(res.get("RealizedMtomPrsnt", 0) or 0),
                     "client": res.get("EntityId", "")
                 }
             return {"error": r.text}
