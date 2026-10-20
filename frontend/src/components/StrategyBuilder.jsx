@@ -63,6 +63,7 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
   // UI states
   const [loading, setLoading] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [refreshingMaster, setRefreshingMaster] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [orderResults, setOrderResults] = useState([]);
@@ -81,6 +82,21 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
       })
       .catch((err) => console.error("Error loading expiries:", err));
   }, []);
+
+  const handleRefreshMaster = async () => {
+    setRefreshingMaster(true);
+    try {
+      const res = await api.refreshMaster();
+      if (res && Array.isArray(res.expiries) && res.expiries.length > 0) {
+        setExpiries(res.expiries);
+        setSelectedExpiry(res.expiries[0].code);
+      }
+    } catch (e) {
+      console.error("Error refreshing token master:", e);
+    } finally {
+      setRefreshingMaster(false);
+    }
+  };
 
   // 2. Initialize Main Strike to ATM when spot arrives
   useEffect(() => {
@@ -580,7 +596,7 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
         </div>
 
         {/* Expiry Selector */}
-        <div className="flex items-center gap-2 w-full sm:w-auto">
+        <div className="flex items-center gap-1.5 w-full sm:w-auto">
           <Calendar className="w-4 h-4 text-slate-500 shrink-0" />
           <select
             value={selectedExpiry}
@@ -593,6 +609,15 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            onClick={handleRefreshMaster}
+            disabled={refreshingMaster}
+            title="Download today's latest token master from Kotak Neo"
+            className="p-1.5 rounded-lg border border-slate-200 hover:border-blue-300 hover:bg-blue-50 text-slate-500 hover:text-blue-600 transition-all cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshingMaster ? 'animate-spin text-blue-600' : ''}`} />
+          </button>
         </div>
       </div>
 

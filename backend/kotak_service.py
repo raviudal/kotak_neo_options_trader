@@ -309,6 +309,14 @@ class KotakNeoManager:
                 conn.commit()
 
             logger.info(f"✅ Kotak Neo login successful for {self.client_name} ({self.ucc}) [In-RAM Session Active]")
+
+            # Download / ensure updated token master for today upon the first login of the day!
+            try:
+                from backend.instrument_master import InstrumentMaster
+                InstrumentMaster.get_instance().ensure_today_master(consumer_key=self.consumer_key)
+            except Exception as e:
+                logger.warning(f"Could not check/update token master after login: {e}")
+
             return {
                 "status": "success",
                 "message": f"Successfully authenticated with Kotak Neo! Welcome {self.client_name}.",

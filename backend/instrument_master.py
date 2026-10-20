@@ -3,7 +3,7 @@ import csv
 import re
 import math
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
@@ -12,26 +12,78 @@ logger = logging.getLogger("instrument_master")
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SCRIP_CSV_PATH = DATA_DIR / "scrip_nse_fo.csv"
 
-def download_scrip_csv():
-    """Attempts to download the latest NSE F&O scrip master from Kotak Neo public endpoint"""
-    urls = [
+def is_scrip_updated_today() -> bool:
+    """Checks if the local scrip_nse_fo.csv exists, is valid size, and was modified today"""
+    if not SCRIP_CSV_PATH.exists() or SCRIP_CSV_PATH.stat().st_size < 100000:
+        return False
+    try:
+        mtime = datetime.fromtimestamp(SCRIP_CSV_PATH.stat().st_mtime)
+        return mtime.date() == datetime.now().date()
+    except Exception:
+        return False
+
+def download_scrip_csv(consumer_key: Optional[str] = None) -> bool:
+    """
+    Downloads the daily updated NSE F&O scrip master from Kotak Neo.
+    1. Queries Kotak Neo API /script-details/1.0/masterscrip/file-paths if consumer_key is available.
+    2. Uses official daily date-stamped Kotak CDN endpoints (today / yesterday fallback).
+    3. Uses legacy static fallback endpoints.
+    """
+    import requests
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    candidate_urls: List[str] = []
+
+    # 1. Dynamic Kotak Neo API discovery if consumer_key is provided or in config
+    if not consumer_key:
+        try:
+            from backend.config import KOTAK_CONSUMER_KEY
+            consumer_key = KOTAK_CONSUMER_KEY
+        except Exception:
+            pass
+
+    if consumer_key:
+        try:
+            logger.info("Querying Kotak Neo API for daily masterscrip file paths...")
+            api_url = "https://e41.kotaksecurities.com/script-details/1.0/masterscrip/file-paths"
+            headers = {"Authorization": consumer_key, "neo-fin-key": "neotradeapi"}
+            res = requests.get(api_url, headers=headers, timeout=8)
+            if res.status_code == 200:
+                data = res.json().get("data", {})
+                for path in data.get("filesPaths", []):
+                    if "nse_fo" in path.lower():
+                        candidate_urls.append(path)
+                        logger.info(f"Discovered official daily Kotak scrip URL: {path}")
+        except Exception as e:
+            logger.warning(f"Kotak Neo API masterscrip discovery fallback: {e}")
+
+    # 2. Known official Kotak CDN endpoints with daily date-stamp
+    candidate_urls.extend([
+        f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{today_str}/transformed/nse_fo.csv",
+        f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{today_str}/nse_fo.csv",
+        f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{yesterday_str}/transformed/nse_fo.csv",
         "https://lapi.kotaksecurities.com/content/files/scrip_nse_fo.csv",
         "https://scripfile.kotaksecurities.com/nse_fo.csv"
-    ]
-    import requests
-    for url in urls:
+    ])
+
+    for url in candidate_urls:
         try:
-            logger.info(f"Attempting to download Kotak scrip master from {url}...")
-            r = requests.get(url, timeout=15, stream=True)
+            logger.info(f"Downloading daily scrip master from: {url}")
+            r = requests.get(url, timeout=30, stream=True)
             if r.status_code == 200:
-                with open(SCRIP_CSV_PATH, "wb") as f:
+                temp_path = SCRIP_CSV_PATH.with_suffix(".csv.tmp")
+                with open(temp_path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=1024 * 1024):
                         if chunk:
                             f.write(chunk)
-                logger.info(f"Successfully downloaded scrip master ({SCRIP_CSV_PATH.stat().st_size} bytes)")
-                return True
+                if temp_path.stat().st_size > 500000:
+                    temp_path.replace(SCRIP_CSV_PATH)
+                    logger.info(f"Successfully updated scrip_nse_fo.csv ({SCRIP_CSV_PATH.stat().st_size} bytes)")
+                    return True
         except Exception as e:
-            logger.debug(f"Failed to download from {url}: {e}")
+            logger.debug(f"Failed download from {url}: {e}")
+
     return False
 
 class Instrument:
@@ -82,18 +134,32 @@ class InstrumentMaster:
             cls._instance = cls()
         return cls._instance
 
-    def load_master(self):
+    def load_master(self, force_reload: bool = False, consumer_key: Optional[str] = None):
+        """
+        Loads the scrip master into memory.
+        If force_reload is True or the local file is not from today, downloads today's copy first.
+        """
         target_path = None
-        if SCRIP_CSV_PATH.exists() and SCRIP_CSV_PATH.stat().st_size > 100000:
-            target_path = SCRIP_CSV_PATH
-        else:
-            # Try to auto-download if missing
-            if download_scrip_csv() and SCRIP_CSV_PATH.exists():
+
+        # Check if file needs download for today
+        if force_reload or not is_scrip_updated_today():
+            logger.info("Scrip master is missing or older than today. Downloading fresh copy from Kotak Neo...")
+            if download_scrip_csv(consumer_key=consumer_key) and SCRIP_CSV_PATH.exists():
                 target_path = SCRIP_CSV_PATH
+
+        if not target_path and SCRIP_CSV_PATH.exists() and SCRIP_CSV_PATH.stat().st_size > 100000:
+            target_path = SCRIP_CSV_PATH
 
         if not target_path:
             logger.warning(f"No scrip master file found at {SCRIP_CSV_PATH}. Option chain and strikes resolution may be limited until scrip_nse_fo.csv is present in data/.")
             return
+
+        # Clear existing mappings before reloading fresh contracts
+        self.instruments_by_token.clear()
+        self.instruments_by_symbol.clear()
+        self.lookup_map.clear()
+        self.expiries.clear()
+        self.strikes_by_expiry.clear()
 
         logger.info(f"Loading NIFTY option instruments from {target_path}...")
         try:
@@ -194,9 +260,24 @@ class InstrumentMaster:
         except Exception as e:
             logger.error(f"Error parsing scrip master CSV: {e}")
 
+    def ensure_today_master(self, force: bool = False, consumer_key: Optional[str] = None) -> bool:
+        """
+        Ensures the token master is up-to-date for today (first login of the day).
+        If today's scrip master is not yet downloaded, downloads it and reloads all instruments.
+        """
+        if not force and is_scrip_updated_today() and self.is_loaded:
+            logger.info("Token master is already up-to-date for today's trading session.")
+            return True
+
+        logger.info("Updating token master for today's trading session...")
+        self.load_master(force_reload=True, consumer_key=consumer_key)
+        return self.is_loaded
+
     def get_sorted_expiries(self) -> List[Dict[str, Any]]:
-        """Returns sorted list of active future expiries"""
-        exp_list = list(self.expiries.values())
+        """Returns sorted list of active future (or today's) expiries, omitting expired dates"""
+        today = datetime.now().date()
+        # Filter out expired contracts strictly prior to today
+        exp_list = [e for e in self.expiries.values() if e["dt"].date() >= today]
         exp_list.sort(key=lambda x: x["dt"])
         return [
             {

@@ -89,6 +89,7 @@ export const api = {
   getExpiries: () => apiRequest("/api/market/expiries"),
   getStrikes: (expiry) => apiRequest(`/api/market/strikes${expiry ? `?expiry=${expiry}` : ''}`),
   getOptionChain: (expiry) => apiRequest(`/api/market/chain${expiry ? `?expiry=${expiry}` : ''}`),
+  refreshMaster: () => apiRequest("/api/market/refresh-master", { method: "POST" }),
 
   // System & Server Health
   getServerHealth: () => apiRequest("/api/system/health"),

@@ -58,6 +58,16 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(market_engine.start_feed_loop())
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
+
+    # Ensure token master is loaded and updated for today at server start
+    try:
+        from backend.instrument_master import InstrumentMaster
+        scrip_task = asyncio.create_task(asyncio.to_thread(InstrumentMaster.get_instance().ensure_today_master))
+        background_tasks.add(scrip_task)
+        scrip_task.add_done_callback(background_tasks.discard)
+    except Exception as e:
+        logger.warning(f"Could not initialize token master background update: {e}")
+
     yield
     market_engine.is_running = False
 
@@ -237,6 +247,14 @@ def login(req: LoginRequest):
 
         # Create new unique session, strictly invalidating any other open session
         token = create_new_user_session(user["id"], user["username"])
+
+        # Check and download updated token master for today upon the first login of the day
+        try:
+            from backend.instrument_master import InstrumentMaster
+            asyncio.create_task(asyncio.to_thread(InstrumentMaster.get_instance().ensure_today_master))
+        except Exception as e:
+            logger.warning(f"Could not trigger background token master check: {e}")
+
         return {
             "access_token": token,
             "token_type": "bearer",
@@ -449,6 +467,23 @@ def get_option_chain(expiry: Optional[str] = Query(None), count: int = Query(10)
     snapshot = master.get_option_chain_snapshot(spot, expiry, count)
     snapshot["is_live"] = market_engine.is_live
     return snapshot
+
+@app.post("/api/market/refresh-master")
+def refresh_token_master(user: dict = Depends(get_current_user)):
+    """Manually force re-download of today's scrip master from Kotak Neo"""
+    manager = KotakNeoManager.get_instance(user["id"])
+    key = manager.consumer_key
+    from backend.instrument_master import InstrumentMaster
+    master = InstrumentMaster.get_instance()
+    success = master.ensure_today_master(force=True, consumer_key=key)
+    expiries = master.get_sorted_expiries()
+    return {
+        "status": "success" if success else "warning",
+        "message": "Token master updated successfully for today!" if success else "Using existing token master copy.",
+        "expiries_count": len(expiries),
+        "nearest_expiry": expiries[0]["display"] if expiries else None,
+        "expiries": expiries
+    }
 
 @app.post("/api/strategies/preview")
 def preview_strategy(req: StrategyPreviewRequest, user: dict = Depends(get_current_user)):
