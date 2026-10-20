@@ -344,6 +344,17 @@ def kotak_positions(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Kotak Neo login required")
     return manager.get_positions()
 
+class CheckMarginRequest(BaseModel):
+    legs: List[Dict[str, Any]]
+
+@app.post("/api/kotak/check-margin")
+def kotak_check_margin(req: CheckMarginRequest, user: dict = Depends(get_current_user)):
+    """Queries Kotak Neo /quick/user/check-margin endpoint for strategy legs"""
+    manager = KotakNeoManager.get_instance(user["id"])
+    if not manager.is_connected:
+        return {"is_connected": False, "message": "Kotak Neo login required"}
+    return manager.check_order_margin(req.legs)
+
 # --- Option Strategies & Stop Loss Endpoints ---
 
 def _enrich_strategy_pnl(strat_dict: dict) -> dict:

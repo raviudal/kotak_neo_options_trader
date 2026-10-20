@@ -230,6 +230,8 @@ export default function App() {
               niftySpot={niftyData?.spot}
               ltpCache={ltpCache}
               wsClient={wsRef.current}
+              kotakStatus={kotakStatus}
+              onOpenKotakModal={() => setShowKotakModal(true)}
               onStrategyCreated={() => {
                 fetchStrategies();
                 setMobileTab('DASHBOARD');

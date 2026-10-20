@@ -19,7 +19,14 @@ const STRATEGY_PRESETS = [
   { id: 'SHORT_STRADDLE', name: 'Short Straddle', type: 'Credit', bias: 'NEUTRAL', desc: 'Sell ATM Call + Sell ATM Put' }
 ];
 
-export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = null, onStrategyCreated }) {
+export default function StrategyBuilder({ 
+  niftySpot, 
+  ltpCache = {}, 
+  wsClient = null, 
+  kotakStatus = null,
+  onOpenKotakModal = null,
+  onStrategyCreated 
+}) {
   const [strategyType, setStrategyType] = useState('BULL_PUT_CREDIT');
   const [strategyName, setStrategyName] = useState('Bull Put Spread');
   const [isNameManuallyEdited, setIsNameManuallyEdited] = useState(false);
@@ -52,6 +59,7 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
   // Account Margin States
   const [availableMargin, setAvailableMargin] = useState(null);
   const [limitsLoading, setLimitsLoading] = useState(false);
+  const [brokerMarginData, setBrokerMarginData] = useState(null);
 
   // Stop Loss & Execution: Choose between Nifty Index Spot SL and Strategy LTP Candle Close SL
   const [slTargetType, setSlTargetType] = useState('STRATEGY_LTP'); // 'INDEX' | 'STRATEGY_LTP'
@@ -98,7 +106,7 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
     return Math.abs(payoff.max_loss || 30000);
   }, [payoff.margin_required, payoff.max_loss, legs, lots, lotSize]);
 
-  // Fetch Kotak Neo Available Limits
+  // Fetch Kotak Neo Available Limits & Real-Time Broker Margins
   const fetchLimits = async () => {
     try {
       setLimitsLoading(true);
@@ -108,6 +116,8 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
         if (val !== null && !isNaN(Number(val))) {
           setAvailableMargin(Number(val));
         }
+      } else {
+        setAvailableMargin(null);
       }
     } catch (e) {
       setAvailableMargin(null);
@@ -133,6 +143,31 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
 
     fetchLimits();
   }, []);
+
+  // Re-fetch limits whenever Kotak connects or login state changes
+  useEffect(() => {
+    if (kotakStatus?.is_connected) {
+      fetchLimits();
+    } else {
+      setAvailableMargin(null);
+    }
+  }, [kotakStatus?.is_connected]);
+
+  // Real-time broker check-margin endpoint query when legs change and Kotak is connected
+  useEffect(() => {
+    if (kotakStatus?.is_connected && legs && legs.length > 0) {
+      api.checkKotakMargin(legs)
+        .then(res => {
+          if (res && res.is_connected) {
+            setBrokerMarginData(res);
+            if (res.broker_available_margin !== null && res.broker_available_margin !== undefined) {
+              setAvailableMargin(res.broker_available_margin);
+            }
+          }
+        })
+        .catch(err => console.debug("Broker check margin error:", err));
+    }
+  }, [legs, kotakStatus?.is_connected]);
 
   const handleRefreshMaster = async () => {
     setRefreshingMaster(true);
@@ -989,12 +1024,22 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
             </div>
             <div>
               <span className="text-slate-500 font-sans text-[10px] block">Avail Margin</span>
-              <span className={`font-bold ${
-                availableMargin === null ? 'text-slate-400' :
-                availableMargin < marginRequired ? 'text-rose-600 font-extrabold' : 'text-emerald-600'
-              }`}>
-                {availableMargin !== null ? `₹${Math.round(availableMargin).toLocaleString('en-IN')}` : '—'}
-              </span>
+              {availableMargin !== null ? (
+                <span className={`font-bold ${
+                  availableMargin < marginRequired ? 'text-rose-600 font-extrabold' : 'text-emerald-600'
+                }`}>
+                  ₹{Math.round(availableMargin).toLocaleString('en-IN')}
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onOpenKotakModal}
+                  className="font-bold text-blue-600 hover:text-blue-800 hover:underline cursor-pointer flex items-center gap-0.5 text-[11px]"
+                  title="Click to connect Kotak Neo"
+                >
+                  <span>Connect Kotak</span>
+                </button>
+              )}
             </div>
             <div>
               <span className="text-slate-500 font-sans text-[10px] block">Premium</span>
@@ -1046,7 +1091,10 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
 
         {/* Margin Required */}
         <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
-          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Margin Req</span>
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Margin Req</span>
+            <span className="text-[8px] px-1 py-0.2 rounded bg-blue-100 text-blue-700 font-bold uppercase font-sans tracking-tight">SPAN Benefit</span>
+          </div>
           <span className="text-sm font-bold text-slate-800 block mt-0.5">
             ₹{Math.round(marginRequired).toLocaleString('en-IN')}
           </span>
@@ -1056,26 +1104,37 @@ export default function StrategyBuilder({ niftySpot, ltpCache = {}, wsClient = n
         <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
           <div className="flex items-center justify-between">
             <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Avail Margin</span>
+            {availableMargin !== null && (
+              <button
+                type="button"
+                onClick={fetchLimits}
+                disabled={limitsLoading}
+                title="Refresh Kotak available margin"
+                className="text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+              >
+                <RefreshCw className={`w-2.5 h-2.5 ${limitsLoading ? 'animate-spin text-blue-600' : ''}`} />
+              </button>
+            )}
+          </div>
+          {availableMargin !== null ? (
+            <span className={`text-xs sm:text-sm font-bold block mt-0.5 truncate ${
+              availableMargin < marginRequired ? 'text-rose-600 font-extrabold' : 'text-emerald-600'
+            }`}>
+              ₹{Math.round(availableMargin).toLocaleString('en-IN')}
+              {availableMargin < marginRequired && (
+                <span className="text-[10px] font-bold text-rose-600 ml-1 uppercase font-sans">⚠️ Low</span>
+              )}
+            </span>
+          ) : (
             <button
               type="button"
-              onClick={fetchLimits}
-              disabled={limitsLoading}
-              title="Refresh Kotak available margin"
-              className="text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+              onClick={onOpenKotakModal}
+              className="mt-1 w-full py-1 px-1.5 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded text-[10px] font-bold text-blue-700 transition-all flex items-center justify-center gap-1 cursor-pointer"
+              title="Click to connect Kotak Neo"
             >
-              <RefreshCw className={`w-2.5 h-2.5 ${limitsLoading ? 'animate-spin text-blue-600' : ''}`} />
+              <span>Connect Kotak</span>
             </button>
-          </div>
-          <span className={`text-xs sm:text-sm font-bold block mt-0.5 truncate ${
-            availableMargin === null ? 'text-slate-400 font-normal text-xs' :
-            availableMargin < marginRequired ? 'text-rose-600 font-extrabold' : 'text-emerald-600'
-          }`}>
-            {availableMargin !== null ? (
-              `₹${Math.round(availableMargin).toLocaleString('en-IN')}`
-            ) : (
-              'Login to Kotak'
-            )}
-          </span>
+          )}
         </div>
 
       </div>

@@ -57,6 +57,10 @@ export const api = {
   }),
   disconnectKotak: () => apiRequest("/api/kotak/disconnect", { method: "POST" }),
   getKotakLimits: () => apiRequest("/api/kotak/limits"),
+  checkKotakMargin: (legs) => apiRequest("/api/kotak/check-margin", {
+    method: "POST",
+    body: JSON.stringify({ legs })
+  }),
   
   // Strategies & SL
   getStrategies: () => apiRequest("/api/strategies"),

@@ -373,45 +373,182 @@ class KotakNeoManager:
             logger.error(f"Error fetching live Nifty quote: {e}")
         return None
 
+    def _probe_live_available_margin(self) -> Optional[float]:
+        """Probes /quick/user/check-margin to read real live avlMrgn / avlCash from Kotak Neo broker RMS"""
+        try:
+            url = f"{self.base_url}quick/user/check-margin?sId={self.trade_sid}"
+            payload = {
+                "jData": json.dumps({
+                    "brkName": "KOTAK",
+                    "brnchId": "ONLINE",
+                    "exSeg": "nse_fo",
+                    "prc": "100.00",
+                    "prcTp": "L",
+                    "prod": "NRML",
+                    "qty": "65",
+                    "tok": "26000",
+                    "trnsTp": "B"
+                })
+            }
+            r = requests.post(url, headers=self.get_auth_headers(), data=payload, timeout=4)
+            if r.status_code == 200:
+                resp = r.json()
+                d = resp.get("data") if isinstance(resp, dict) else resp
+                if isinstance(d, list) and len(d) > 0:
+                    d = d[0]
+                if isinstance(d, dict):
+                    for k in ["avlMrgn", "avlCash", "available_margin"]:
+                        v = d.get(k)
+                        if v is not None:
+                            try:
+                                num = float(str(v).replace(",", "").strip())
+                                if num > 0:
+                                    return num
+                            except Exception:
+                                pass
+        except Exception as e:
+            logger.debug(f"Probe available margin exception: {e}")
+        return None
+
     def get_limits(self) -> Dict[str, Any]:
-        """Fetches account margin and available limits"""
+        """Fetches account margin and available limits from Kotak Neo RMS"""
         if not self.is_connected or not self.trade_token:
-            return {"error": "Kotak Neo API is not connected"}
+            return {"error": "Kotak Neo API is not connected", "is_connected": False}
         try:
             url = f"{self.base_url}quick/user/limits?sId={self.trade_sid}"
             data = {"jData": json.dumps({"seg": "ALL", "exch": "ALL", "prod": "ALL"})}
             r = requests.post(url, headers=self.get_auth_headers(), data=data, timeout=8)
+            logger.info(f"Kotak limits raw HTTP {r.status_code}: {r.text[:300]}")
             if r.status_code == 200:
-                res = r.json()
-                net_avail = float(res.get("Net", 0) or 0)
-                cash_val = float(res.get("Cash", 0) or 0)
-                collateral_val = float(res.get("Collateral", 0) or 0)
-                collateral_value = float(res.get("CollateralValue", 0) or 0)
-                utilized = float(res.get("AmountUtilizedPrsnt", 0) or 0)
+                raw = r.json()
+                d = raw
+                if isinstance(d, dict) and "data" in d:
+                    d = d["data"]
+                if isinstance(d, list) and len(d) > 0:
+                    d = d[0]
+                if not isinstance(d, dict):
+                    d = raw if isinstance(raw, dict) else {}
 
-                # Available margin: prefer Net if available, else Cash + Collateral, else CollateralValue
-                if net_avail > 0:
-                    avail_margin = net_avail
-                elif (cash_val + collateral_val) > 0:
-                    avail_margin = cash_val + collateral_val
-                elif collateral_value > 0:
-                    avail_margin = collateral_value
+                def _to_float(v):
+                    if v is None: return 0.0
+                    try:
+                        return float(str(v).replace(",", "").strip())
+                    except Exception:
+                        return 0.0
+
+                avl_mrgn = _to_float(d.get("avlMrgn") or d.get("available_margin"))
+                avl_cash = _to_float(d.get("avlCash") or d.get("Cash") or d.get("available_cash"))
+                net = _to_float(d.get("Net") or d.get("net"))
+                collateral = _to_float(d.get("Collateral") or d.get("CollateralValue"))
+                utilized = _to_float(d.get("totMrgnUsd") or d.get("mrgnUsd") or d.get("AmountUtilizedPrsnt"))
+                realized_pnl = _to_float(d.get("RealizedMtomPrsnt"))
+
+                if avl_mrgn > 0:
+                    best_avail = avl_mrgn
+                elif net > 0:
+                    best_avail = net
+                elif (avl_cash + collateral) > 0:
+                    best_avail = avl_cash + collateral
+                elif avl_cash > 0:
+                    best_avail = avl_cash
                 else:
-                    avail_margin = 0.0
+                    best_avail = 0.0
+
+                # If limits response didn't supply positive balance, attempt probe check-margin
+                if best_avail <= 0.0:
+                    probed = self._probe_live_available_margin()
+                    if probed and probed > 0:
+                        best_avail = probed
+                        if avl_cash <= 0:
+                            avl_cash = probed
 
                 return {
-                    "available_margin": round(avail_margin, 2),
-                    "available_cash": round(avail_margin, 2),
-                    "net": net_avail,
-                    "cash": cash_val,
-                    "collateral": collateral_val,
-                    "utilized_margin": utilized,
-                    "realized_pnl": float(res.get("RealizedMtomPrsnt", 0) or 0),
-                    "client": res.get("EntityId", "")
+                    "available_margin": round(best_avail, 2),
+                    "available_cash": round(avl_cash or best_avail, 2),
+                    "collateral": round(collateral, 2),
+                    "utilized_margin": round(utilized, 2),
+                    "realized_pnl": round(realized_pnl, 2),
+                    "client": d.get("EntityId") or self.ucc or "",
+                    "is_connected": True,
+                    "raw": raw
                 }
-            return {"error": r.text}
+            return {"error": r.text, "is_connected": False}
         except Exception as e:
-            return {"error": str(e)}
+            logger.error(f"Error fetching limits: {e}")
+            return {"error": str(e), "is_connected": False}
+
+    def check_order_margin(self, legs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Directly queries Kotak Neo /quick/user/check-margin endpoint for strategy legs.
+        Fetches live broker RMS required margin and available margin.
+        """
+        if not self.is_connected or not self.trade_token:
+            return {"error": "Kotak Neo API is not connected", "is_connected": False}
+
+        results = []
+        total_broker_margin = 0.0
+        broker_avail_margin = None
+        broker_avail_cash = None
+
+        url = f"{self.base_url}quick/user/check-margin?sId={self.trade_sid}"
+
+        for leg in legs:
+            try:
+                tok = str(leg.get("token") or "")
+                action = "B" if str(leg.get("action", "")).upper() == "BUY" else "S"
+                qty = str(int(leg.get("quantity") or 65))
+                price = f"{float(leg.get('price') or 0.0):.2f}"
+                seg = str(leg.get("exchange_segment") or "nse_fo")
+                prod = str(leg.get("product") or "NRML")
+
+                payload = {
+                    "jData": json.dumps({
+                        "brkName": "KOTAK",
+                        "brnchId": "ONLINE",
+                        "exSeg": seg,
+                        "prc": price,
+                        "prcTp": "L" if float(price) > 0 else "MKT",
+                        "prod": prod,
+                        "qty": qty,
+                        "tok": tok,
+                        "trnsTp": action
+                    })
+                }
+
+                r = requests.post(url, headers=self.get_auth_headers(), data=payload, timeout=6)
+                if r.status_code == 200:
+                    resp_json = r.json()
+                    data = resp_json.get("data") if isinstance(resp_json, dict) else {}
+                    if isinstance(data, list) and len(data) > 0:
+                        data = data[0]
+                    if not isinstance(data, dict):
+                        data = resp_json if isinstance(resp_json, dict) else {}
+
+                    req_mrgn = float(data.get("reqdMrgn") or data.get("ordMrgn") or 0.0)
+                    total_broker_margin += req_mrgn
+
+                    if data.get("avlMrgn") is not None:
+                        broker_avail_margin = float(data.get("avlMrgn") or 0.0)
+                    if data.get("avlCash") is not None:
+                        broker_avail_cash = float(data.get("avlCash") or 0.0)
+
+                    results.append({
+                        "token": tok,
+                        "symbol": leg.get("trading_symbol", ""),
+                        "action": action,
+                        "reqd_margin": req_mrgn,
+                        "raw": data
+                    })
+            except Exception as e:
+                logger.warning(f"Error checking margin on Kotak for leg {leg}: {e}")
+
+        return {
+            "is_connected": True,
+            "broker_total_margin": round(total_broker_margin, 2),
+            "broker_available_margin": broker_avail_margin,
+            "broker_available_cash": broker_avail_cash,
+            "leg_details": results
+        }
 
     def get_positions(self) -> List[Dict[str, Any]]:
         """Fetches live broker open/closed positions"""
