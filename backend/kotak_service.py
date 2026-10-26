@@ -418,7 +418,7 @@ class KotakNeoManager:
             url = f"{self.base_url}quick/user/limits?sId={self.trade_sid}"
             data = {"jData": json.dumps({"seg": "ALL", "exch": "ALL", "prod": "ALL"})}
             r = requests.post(url, headers=self.get_auth_headers(), data=data, timeout=8)
-            logger.info(f"Kotak limits raw HTTP {r.status_code}: {r.text[:300]}")
+            logger.info(f"Kotak limits raw HTTP {r.status_code}: {r.text[:500]}")
             if r.status_code == 200:
                 raw = r.json()
                 d = raw
@@ -437,20 +437,25 @@ class KotakNeoManager:
                         return 0.0
 
                 avl_mrgn = _to_float(d.get("avlMrgn") or d.get("available_margin"))
-                avl_cash = _to_float(d.get("avlCash") or d.get("Cash") or d.get("available_cash"))
+                cash = _to_float(d.get("Cash") or d.get("NotionalCash") or d.get("avlCash") or d.get("available_cash"))
                 net = _to_float(d.get("Net") or d.get("net"))
-                collateral = _to_float(d.get("Collateral") or d.get("CollateralValue"))
-                utilized = _to_float(d.get("totMrgnUsd") or d.get("mrgnUsd") or d.get("AmountUtilizedPrsnt"))
+                collateral = _to_float(d.get("Collateral") or d.get("RmsCollateral"))
+                collateral_val = _to_float(d.get("CollateralValue"))
+                utilized = _to_float(d.get("AmountUtilizedPrsnt") or d.get("totMrgnUsd") or d.get("mrgnUsd"))
                 realized_pnl = _to_float(d.get("RealizedMtomPrsnt"))
+
+                effective_collateral = max(collateral, collateral_val)
 
                 if avl_mrgn > 0:
                     best_avail = avl_mrgn
                 elif net > 0:
                     best_avail = net
-                elif (avl_cash + collateral) > 0:
-                    best_avail = avl_cash + collateral
-                elif avl_cash > 0:
-                    best_avail = avl_cash
+                elif (effective_collateral + cash) > 0:
+                    best_avail = max(0.0, (effective_collateral + cash) - utilized)
+                elif cash > 0:
+                    best_avail = max(0.0, cash - utilized)
+                elif collateral > 0:
+                    best_avail = max(0.0, collateral - utilized)
                 else:
                     best_avail = 0.0
 
@@ -459,13 +464,13 @@ class KotakNeoManager:
                     probed = self._probe_live_available_margin()
                     if probed and probed > 0:
                         best_avail = probed
-                        if avl_cash <= 0:
-                            avl_cash = probed
+                        if cash <= 0:
+                            cash = probed
 
                 return {
                     "available_margin": round(best_avail, 2),
-                    "available_cash": round(avl_cash or best_avail, 2),
-                    "collateral": round(collateral, 2),
+                    "available_cash": round(cash or best_avail, 2),
+                    "collateral": round(effective_collateral, 2),
                     "utilized_margin": round(utilized, 2),
                     "realized_pnl": round(realized_pnl, 2),
                     "client": d.get("EntityId") or self.ucc or "",
@@ -480,7 +485,7 @@ class KotakNeoManager:
     def check_order_margin(self, legs: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Directly queries Kotak Neo /quick/user/check-margin endpoint for strategy legs.
-        Fetches live broker RMS required margin and available margin.
+        Fetches full broker RMS required margin and available margin.
         """
         if not self.is_connected or not self.trade_token:
             return {"error": "Kotak Neo API is not connected", "is_connected": False}
@@ -493,14 +498,14 @@ class KotakNeoManager:
         url = f"{self.base_url}quick/user/check-margin?sId={self.trade_sid}"
 
         for leg in legs:
-            try:
-                tok = str(leg.get("token") or "")
-                action = "B" if str(leg.get("action", "")).upper() == "BUY" else "S"
-                qty = str(int(leg.get("quantity") or 65))
-                price = f"{float(leg.get('price') or 0.0):.2f}"
-                seg = str(leg.get("exchange_segment") or "nse_fo")
-                prod = str(leg.get("product") or "NRML")
+            action = "B" if str(leg.get("action", "")).upper() == "BUY" else "S"
+            qty = str(int(leg.get("quantity") or 65))
+            price = f"{float(leg.get('price') or 0.0):.2f}"
+            seg = str(leg.get("exchange_segment") or "nse_fo")
+            prod = str(leg.get("product") or "NRML")
+            tok = str(leg.get("token") or "")
 
+            try:
                 payload = {
                     "jData": json.dumps({
                         "brkName": "KOTAK",
@@ -525,12 +530,20 @@ class KotakNeoManager:
                         data = resp_json if isinstance(resp_json, dict) else {}
 
                     req_mrgn = float(data.get("reqdMrgn") or data.get("ordMrgn") or 0.0)
+                    if req_mrgn <= 0.0:
+                        # Full naked margin fallback if broker returns 0
+                        if action == "S":
+                            req_mrgn = 125000.0 * (int(qty) / 65.0)
+                        else:
+                            req_mrgn = float(price) * int(qty)
                     total_broker_margin += req_mrgn
 
-                    if data.get("avlMrgn") is not None:
-                        broker_avail_margin = float(data.get("avlMrgn") or 0.0)
-                    if data.get("avlCash") is not None:
-                        broker_avail_cash = float(data.get("avlCash") or 0.0)
+                    avl_m = float(data.get("avlMrgn") or 0.0)
+                    if avl_m > 0:
+                        broker_avail_margin = avl_m
+                    avl_c = float(data.get("avlCash") or 0.0)
+                    if avl_c > 0:
+                        broker_avail_cash = avl_c
 
                     results.append({
                         "token": tok,
@@ -539,8 +552,20 @@ class KotakNeoManager:
                         "reqd_margin": req_mrgn,
                         "raw": data
                     })
+                else:
+                    # Fallback to full margin if broker API returned non-200
+                    if action == "S":
+                        fb = 125000.0 * (int(qty) / 65.0)
+                    else:
+                        fb = float(price) * int(qty)
+                    total_broker_margin += fb
             except Exception as e:
                 logger.warning(f"Error checking margin on Kotak for leg {leg}: {e}")
+                if action == "S":
+                    fb = 125000.0 * (int(qty) / 65.0)
+                else:
+                    fb = float(price) * int(qty)
+                total_broker_margin += fb
 
         return {
             "is_connected": True,

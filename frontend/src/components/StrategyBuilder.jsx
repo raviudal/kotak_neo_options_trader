@@ -3,7 +3,7 @@ import {
   Layers, Plus, Trash2, ArrowUpRight, ArrowDownRight, ShieldAlert, 
   CheckCircle2, ChevronRight, Calendar, Sparkles, RefreshCw, Sliders,
   TrendingUp, TrendingDown, Target, Info, Edit2, RotateCcw,
-  ChevronDown, ChevronUp, GripVertical, Calculator, AlertTriangle, Wallet
+  ChevronDown, ChevronUp, GripVertical, Calculator, AlertTriangle, Wallet, X
 } from 'lucide-react';
 import { api } from '../services/api';
 import PayoffGraph from './PayoffGraph';
@@ -84,27 +84,21 @@ export default function StrategyBuilder({
   // Available strikes
   const atmSpot = niftySpot ? Math.round(niftySpot / 50) * 50 : 25100;
 
-  // Margin Required Calculation (NSE SPAN + Exposure rule approximation or backend metric)
+  // Margin Required Calculation (Full broker margin from API or calculation)
   const marginRequired = useMemo(() => {
-    if (payoff.margin_required !== null && payoff.margin_required !== undefined) {
+    if (brokerMarginData?.broker_total_margin && Number(brokerMarginData.broker_total_margin) > 0) {
+      return Number(brokerMarginData.broker_total_margin);
+    }
+    if (payoff.margin_required !== null && payoff.margin_required !== undefined && Number(payoff.margin_required) > 0) {
       return Number(payoff.margin_required);
     }
-    const hasSell = legs.some(l => String(l.action).toUpperCase() === 'SELL');
-    const hasBuy = legs.some(l => String(l.action).toUpperCase() === 'BUY');
-    const totalBuyPrem = legs
+    const sellLegs = legs.filter(l => String(l.action).toUpperCase() === 'SELL');
+    const buyPrem = legs
       .filter(l => String(l.action).toUpperCase() === 'BUY')
       .reduce((sum, l) => sum + (parseFloat(l.price) || 0) * (parseInt(l.quantity) || lots * lotSize), 0);
-
-    if (!hasSell) return Math.max(0, totalBuyPrem);
-    if (hasSell && hasBuy && payoff.max_loss !== null && payoff.max_loss < 0) {
-      return Math.max(Math.abs(payoff.max_loss) + (18000 * lots), 28000 * lots);
-    }
-    if (hasSell && !hasBuy) {
-      const sellCount = legs.filter(l => String(l.action).toUpperCase() === 'SELL').length;
-      return 125000 * lots * (sellCount >= 2 ? 1.4 : 1.0);
-    }
-    return Math.abs(payoff.max_loss || 30000);
-  }, [payoff.margin_required, payoff.max_loss, legs, lots, lotSize]);
+    const shortMargin = sellLegs.reduce((sum, l) => sum + (125000 * ((parseInt(l.quantity) || lots * lotSize) / lotSize)), 0);
+    return shortMargin + buyPrem;
+  }, [brokerMarginData?.broker_total_margin, payoff.margin_required, legs, lots, lotSize]);
 
   // Fetch Kotak Neo Available Limits & Real-Time Broker Margins
   const fetchLimits = async () => {
@@ -116,11 +110,9 @@ export default function StrategyBuilder({
         if (val !== null && !isNaN(Number(val))) {
           setAvailableMargin(Number(val));
         }
-      } else {
-        setAvailableMargin(null);
       }
     } catch (e) {
-      setAvailableMargin(null);
+      console.debug("fetchLimits error:", e);
     } finally {
       setLimitsLoading(false);
     }
@@ -160,8 +152,8 @@ export default function StrategyBuilder({
         .then(res => {
           if (res && res.is_connected) {
             setBrokerMarginData(res);
-            if (res.broker_available_margin !== null && res.broker_available_margin !== undefined) {
-              setAvailableMargin(res.broker_available_margin);
+            if (res.broker_available_margin && Number(res.broker_available_margin) > 0) {
+              setAvailableMargin(Number(res.broker_available_margin));
             }
           }
         })
@@ -653,6 +645,9 @@ export default function StrategyBuilder({
       if (res.execution && Array.isArray(res.execution)) {
         setOrderResults(res.execution);
       }
+      setTimeout(() => {
+        setSuccess('');
+      }, 6000);
       if (onStrategyCreated) onStrategyCreated();
     } catch (err) {
       setError(err.message);
@@ -689,13 +684,9 @@ export default function StrategyBuilder({
             <Layers className="w-4 h-4" />
           </div>
           <div>
-            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <span>Strategy Builder</span>
-              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-                Sensibull Mode
-              </span>
+            <h3 className="text-sm font-bold text-slate-900">
+              Strategy Builder
             </h3>
-            <p className="text-xs text-slate-500">Live Payoff • Multi-Leg Stepper • Index SL</p>
           </div>
         </div>
 
@@ -996,20 +987,44 @@ export default function StrategyBuilder({
 
             <div className="h-4 w-[1px] bg-slate-300 hidden sm:block"></div>
 
-            {/* Multiplier (Lots Dropdown - Circled in red in screenshot) */}
+            {/* Multiplier (Manual input with - / + stepper) */}
             <div className="flex items-center gap-1.5">
               <span className="text-slate-600 font-semibold">Multiplier</span>
-              <select
-                value={lots}
-                onChange={(e) => handleLotsChange(Math.max(1, parseInt(e.target.value) || 1))}
-                className="bg-white border border-slate-300 rounded px-2 py-1 text-xs font-semibold text-slate-800 shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
-              >
-                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20].map(m => (
-                  <option key={m} value={m}>
-                    {m} ({m * lotSize} Qty)
-                  </option>
-                ))}
-              </select>
+              <div className="inline-flex items-center border border-slate-300 rounded bg-white shadow-sm overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => handleLotsChange(Math.max(1, lots - 1))}
+                  className="px-2.5 py-1 hover:bg-slate-100 text-slate-700 font-bold border-r border-slate-200 transition-colors cursor-pointer"
+                  title="Decrease lots"
+                >
+                  −
+                </button>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={lots}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value);
+                    if (!isNaN(val) && val > 0) {
+                      handleLotsChange(val);
+                    }
+                  }}
+                  className="w-12 py-1 font-mono font-bold text-slate-800 text-xs text-center focus:outline-none focus:bg-blue-50/50 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                  title="Enter lots manually"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleLotsChange(lots + 1)}
+                  className="px-2.5 py-1 hover:bg-slate-100 text-slate-700 font-bold border-l border-slate-200 transition-colors cursor-pointer"
+                  title="Increase lots"
+                >
+                  +
+                </button>
+              </div>
+              <span className="text-[10px] text-slate-400 font-mono hidden sm:inline">
+                ({lots * lotSize} Qty)
+              </span>
             </div>
 
           </div>
@@ -1055,53 +1070,50 @@ export default function StrategyBuilder({
       </div>
 
       {/* 5. Sensibull Payoff & Margin Metrics Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 font-mono">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1.5 sm:gap-2 font-mono">
         
         {/* Max Profit */}
-        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
           <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Max Profit</span>
-          <span className="text-sm font-bold text-emerald-600 block mt-0.5">
+          <span className="text-xs sm:text-sm font-bold text-emerald-600 block mt-0.5 break-words">
             {payoff.max_profit !== null ? `+₹${Math.round(payoff.max_profit).toLocaleString('en-IN')}` : 'Unlimited'}
           </span>
         </div>
 
         {/* Max Loss */}
-        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
           <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Max Loss</span>
-          <span className="text-sm font-bold text-rose-600 block mt-0.5">
+          <span className="text-xs sm:text-sm font-bold text-rose-600 block mt-0.5 break-words">
             {payoff.max_loss !== null ? `-₹${Math.round(Math.abs(payoff.max_loss)).toLocaleString('en-IN')}` : 'Unlimited'}
           </span>
         </div>
 
         {/* Risk / Reward */}
-        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
           <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Risk / Reward</span>
-          <span className="text-sm font-bold text-slate-800 block mt-0.5">
+          <span className="text-xs sm:text-sm font-bold text-slate-800 block mt-0.5">
             {payoff.risk_reward}
           </span>
         </div>
 
         {/* Breakeven(s) */}
-        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
           <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Breakeven(s)</span>
-          <span className="text-xs sm:text-sm font-bold text-slate-800 block mt-0.5 truncate" title={payoff.breakevens.length > 0 ? payoff.breakevens.map(b => Math.round(b)).join(' & ') : '—'}>
+          <span className="text-[11px] sm:text-xs font-bold text-slate-800 block mt-0.5 leading-tight break-words" title={payoff.breakevens.length > 0 ? payoff.breakevens.map(b => Math.round(b)).join(' & ') : '—'}>
             {payoff.breakevens.length > 0 ? payoff.breakevens.map(b => Math.round(b)).join(' & ') : '—'}
           </span>
         </div>
 
         {/* Margin Required */}
-        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Margin Req</span>
-            <span className="text-[8px] px-1 py-0.2 rounded bg-blue-100 text-blue-700 font-bold uppercase font-sans tracking-tight">SPAN Benefit</span>
-          </div>
-          <span className="text-sm font-bold text-slate-800 block mt-0.5">
+        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Margin Req</span>
+          <span className="text-xs sm:text-sm font-bold text-slate-800 block mt-0.5 break-words">
             ₹{Math.round(marginRequired).toLocaleString('en-IN')}
           </span>
         </div>
 
         {/* Available Margin */}
-        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
           <div className="flex items-center justify-between">
             <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Avail Margin</span>
             {availableMargin !== null && (
@@ -1117,19 +1129,23 @@ export default function StrategyBuilder({
             )}
           </div>
           {availableMargin !== null ? (
-            <span className={`text-xs sm:text-sm font-bold block mt-0.5 truncate ${
-              availableMargin < marginRequired ? 'text-rose-600 font-extrabold' : 'text-emerald-600'
-            }`}>
-              ₹{Math.round(availableMargin).toLocaleString('en-IN')}
+            <div className="mt-0.5 flex flex-wrap items-baseline gap-1">
+              <span className={`text-xs sm:text-sm font-bold break-words leading-tight ${
+                availableMargin < marginRequired ? 'text-rose-600 font-extrabold' : 'text-emerald-600'
+              }`}>
+                ₹{Math.round(availableMargin).toLocaleString('en-IN')}
+              </span>
               {availableMargin < marginRequired && (
-                <span className="text-[10px] font-bold text-rose-600 ml-1 uppercase font-sans">⚠️ Low</span>
+                <span className="text-[9px] px-1 py-0.2 rounded bg-rose-100 text-rose-700 font-bold uppercase font-sans tracking-tight">
+                  Low
+                </span>
               )}
-            </span>
+            </div>
           ) : (
             <button
               type="button"
               onClick={onOpenKotakModal}
-              className="mt-1 w-full py-1 px-1.5 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded text-[10px] font-bold text-blue-700 transition-all flex items-center justify-center gap-1 cursor-pointer"
+              className="mt-1 w-full py-1 px-1 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded text-[10px] font-bold text-blue-700 transition-all flex items-center justify-center gap-1 cursor-pointer"
               title="Click to connect Kotak Neo"
             >
               <span>Connect Kotak</span>
@@ -1162,26 +1178,6 @@ export default function StrategyBuilder({
       {error && (
         <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 font-medium text-xs">
           {error}
-        </div>
-      )}
-      {success && (
-        <div className="p-3.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs space-y-2">
-          <div className="flex items-center gap-2 font-bold text-xs">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>{success}</span>
-          </div>
-          {orderResults.length > 0 && (
-            <div className="pt-2 border-t border-emerald-200 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono">
-              {orderResults.map((ord, idx) => (
-                <div key={idx} className="p-2 bg-white rounded border border-emerald-200">
-                  <span className={ord.status === 'success' ? 'text-emerald-700 font-bold' : 'text-rose-600 font-bold'}>
-                    {ord.action} {ord.quantity}x {ord.trading_symbol}:
-                  </span>{' '}
-                  <span className="text-slate-800">{ord.message || (ord.order_id ? `Order #${ord.order_id}` : 'Processed')}</span>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       )}
 
@@ -1548,6 +1544,50 @@ export default function StrategyBuilder({
           )}
         </button>
       </form>
+
+      {/* Floating Corner Toast Notification for Strategy Execution */}
+      {success && (
+        <div className="fixed bottom-5 right-5 z-50 max-w-sm sm:max-w-md w-[calc(100vw-2.5rem)] bg-white border border-emerald-500/30 shadow-2xl rounded-xl p-4 animate-in fade-in slide-in-from-bottom-4 duration-300 ring-1 ring-black/5">
+          <div className="flex items-start gap-3">
+            <div className="p-1.5 rounded-full bg-emerald-100 text-emerald-600 shrink-0">
+              <CheckCircle2 className="w-5 h-5" />
+            </div>
+            <div className="flex-1 min-w-0 pr-1">
+              <h4 className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                Strategy Executed Successfully
+              </h4>
+              <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed break-words">
+                {success}
+              </p>
+              {orderResults.length > 0 && (
+                <div className="mt-2.5 pt-2 border-t border-slate-100 max-h-40 overflow-y-auto space-y-1.5 font-mono text-[10px]">
+                  {orderResults.map((ord, idx) => (
+                    <div key={idx} className="p-1.5 bg-slate-50 rounded border border-slate-200 flex items-center justify-between gap-2">
+                      <span className={ord.status === 'success' ? 'text-emerald-700 font-bold' : 'text-rose-600 font-bold'}>
+                        {ord.action} {ord.quantity}x {ord.trading_symbol}
+                      </span>
+                      <span className="text-slate-600 shrink-0">
+                        {ord.message || (ord.order_id ? `#${ord.order_id}` : 'OK')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setSuccess('');
+                setOrderResults([]);
+              }}
+              className="text-slate-400 hover:text-slate-700 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer shrink-0"
+              title="Dismiss notification"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

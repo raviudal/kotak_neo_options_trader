@@ -801,19 +801,11 @@ class InstrumentMaster:
         total_qty = max([int(l.get("quantity", 65)) for l in legs], default=65)
         num_lots = max(1, total_qty // 65)
 
-        if not sell_legs:
-            # Pure debit / long options: only total premium required
-            margin_required = max(0.0, total_buy_prem)
-        elif sell_legs and buy_legs and max_loss is not None and max_loss < 0:
-            # Defined-risk spread (e.g. Bull Put, Bear Call, Iron Condor)
-            # Exchange SPAN with hedge benefit: Max Loss + buffer (~₹18,000 per lot)
-            margin_required = max(abs(max_loss) + (18000.0 * num_lots), 28000.0 * num_lots)
-        elif sell_legs and not buy_legs:
-            # Naked short options: ~₹1,25,000 per lot on Nifty
-            mult = 1.4 if len(sell_legs) >= 2 else 1.0
-            margin_required = 125000.0 * num_lots * mult
-        else:
-            margin_required = abs(max_loss) + (20000.0 * num_lots) if max_loss else 45000.0 * num_lots
+        # Full Margin Required Calculation (Full broker margin from API / exchange without SPAN discount)
+        short_margin = sum(125000.0 * (int(l.get("quantity", 65)) / 65.0) for l in sell_legs)
+        margin_required = short_margin + total_buy_prem
+        if margin_required <= 0:
+            margin_required = total_buy_prem if total_buy_prem > 0 else 50000.0 * num_lots
 
         return {
             "max_profit": max_profit,

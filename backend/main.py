@@ -565,6 +565,16 @@ def preview_strategy(req: StrategyPreviewRequest, user: dict = Depends(get_curre
     auto_name = master.generate_strategy_name(req.strategy_type, legs)
     anchor = req.main_strike if req.main_strike is not None else (round(spot / 50.0) * 50.0)
 
+    # Fetch live full margin from Kotak Neo API if connected
+    margin_req = payoff.get("margin_required")
+    try:
+        if manager.is_connected and legs:
+            margin_res = manager.check_order_margin(legs)
+            if margin_res and margin_res.get("broker_total_margin", 0) > 0:
+                margin_req = margin_res["broker_total_margin"]
+    except Exception as e:
+        logger.debug(f"Error checking broker margin during preview: {e}")
+
     return {
         "strategy_type": req.strategy_type,
         "strategy_name": auto_name,
@@ -579,7 +589,7 @@ def preview_strategy(req: StrategyPreviewRequest, user: dict = Depends(get_curre
         "breakeven_high": payoff.get("breakeven_high"),
         "breakevens": payoff.get("breakevens", []),
         "risk_reward": payoff.get("risk_reward"),
-        "margin_required": payoff.get("margin_required"),
+        "margin_required": margin_req,
         "net_premium": payoff.get("net_premium"),
         "payoff_curve": payoff.get("payoff_curve", [])
     }

@@ -44,20 +44,19 @@ def sync_to_gcp():
     remote_dir = os.getenv("GCP_TARGET_DIR", f"/home/{gcp_user}/neotrader")
 
     print(f"[2/3] Uploading archive to VM ({gcp_user}@{gcp_ip}:{remote_dir}/)...")
-    ssh_upload_cmd = [
-        "ssh", "-i", gcp_key, "-o", "BatchMode=yes",
-        f"{gcp_user}@{gcp_ip}",
-        f"cat > {remote_dir}/deploy_archive.tar.gz"
+    scp_upload_cmd = [
+        "scp", "-i", gcp_key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+        str(tar_path),
+        f"{gcp_user}@{gcp_ip}:{remote_dir}/deploy_archive.tar.gz"
     ]
-    with open(tar_path, "rb") as f:
-        res = subprocess.run(ssh_upload_cmd, stdin=f)
+    res = subprocess.run(scp_upload_cmd)
     if res.returncode != 0:
-        print("Archive stream upload failed.")
+        print("Archive scp upload failed.")
         sys.exit(res.returncode)
 
     print("[3/3] Extracting files, running migrations, and restarting neotrader.service...")
     ssh_restart_cmd = [
-        "ssh", "-i", gcp_key, "-o", "BatchMode=yes",
+        "ssh", "-i", gcp_key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
         f"{gcp_user}@{gcp_ip}",
         f"cd {remote_dir} && tar -xzf deploy_archive.tar.gz && rm deploy_archive.tar.gz && venv/bin/python -m backend.database && sudo systemctl restart neotrader.service && sudo systemctl status neotrader.service --no-pager"
     ]
