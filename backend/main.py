@@ -110,6 +110,7 @@ class StrategyLegInput(BaseModel):
     expiry: Optional[str] = None
     entry_price: Optional[float] = 0.0
     order_type: Optional[str] = "MKT"
+    exchange_segment: Optional[str] = None
 
 class StrategyCreateRequest(BaseModel):
     name: str
@@ -129,6 +130,7 @@ class StrategyCreateRequest(BaseModel):
     candle_interval: Optional[int] = 0         # 0, 5, 15, 30, 60 minutes
     sl_target_type: Optional[str] = "INDEX"    # 'INDEX' or 'STRATEGY_LTP'
     strategy_sl_value: Optional[float] = None  # Trigger value for Strategy LTP SL
+    underlying: Optional[str] = "NIFTY"
     legs: List[StrategyLegInput]
 
 class StrategyUpdateSLRequest(BaseModel):
@@ -149,6 +151,7 @@ class StrategyPreviewRequest(BaseModel):
     main_strike: Optional[float] = None
     hedge_distance: Optional[float] = None
     custom_legs: Optional[List[Dict[str, Any]]] = None
+    underlying: Optional[str] = "NIFTY"
 
 class SingleOrderRequest(BaseModel):
     trading_symbol: str
@@ -456,19 +459,19 @@ def get_order_logs(limit: int = Query(100), user: dict = Depends(get_current_use
 
 
 @app.get("/api/market/expiries")
-def get_nifty_expiries(user: dict = Depends(get_current_user)):
+def get_market_expiries(underlying: str = Query("NIFTY"), user: dict = Depends(get_current_user)):
     from backend.instrument_master import InstrumentMaster
     master = InstrumentMaster.get_instance()
-    return master.get_sorted_expiries()
+    return master.get_sorted_expiries(underlying=underlying)
 
 @app.get("/api/market/strikes")
-def get_nifty_strikes(expiry: Optional[str] = Query(None), user: dict = Depends(get_current_user)):
+def get_market_strikes(expiry: Optional[str] = Query(None), underlying: str = Query("NIFTY"), user: dict = Depends(get_current_user)):
     from backend.instrument_master import InstrumentMaster
     master = InstrumentMaster.get_instance()
-    return master.get_strikes(expiry)
+    return master.get_strikes(expiry, underlying=underlying)
 
 @app.get("/api/market/chain")
-def get_option_chain(expiry: Optional[str] = Query(None), count: int = Query(10), user: dict = Depends(get_current_user)):
+def get_option_chain(expiry: Optional[str] = Query(None), count: int = Query(10), underlying: str = Query("NIFTY"), user: dict = Depends(get_current_user)):
     """Returns current active strikes and spot from master scrip and live prices"""
     manager = KotakNeoManager.get_instance(user["id"])
     if not manager.is_connected:
@@ -476,8 +479,12 @@ def get_option_chain(expiry: Optional[str] = Query(None), count: int = Query(10)
 
     from backend.instrument_master import InstrumentMaster
     master = InstrumentMaster.get_instance()
-    spot = market_engine.nifty_spot or 25100.0
-    snapshot = master.get_option_chain_snapshot(spot, expiry, count)
+    u = underlying.upper() if underlying else "NIFTY"
+    is_sensex = (u == "SENSEX")
+    default_spot = 80000.0 if is_sensex else 25100.0
+    live_spot = market_engine.sensex_spot if is_sensex else market_engine.nifty_spot
+    spot = live_spot or default_spot
+    snapshot = master.get_option_chain_snapshot(spot, expiry, count, underlying=u)
     snapshot["is_live"] = market_engine.is_live
     return snapshot
 
@@ -503,14 +510,22 @@ def preview_strategy(req: StrategyPreviewRequest, user: dict = Depends(get_curre
     """Computes exact strikes, expiries, tokens, symbols, auto strategy name, and payoff profile for preset"""
     from backend.instrument_master import InstrumentMaster
     master = InstrumentMaster.get_instance()
-    spot = req.spot_price or market_engine.nifty_spot or 25100.0
-    effective_hedge = req.hedge_distance if req.hedge_distance is not None else (req.spread_width or 100.0)
+    u = (req.underlying or "NIFTY").upper()
+    is_sensex = (u == "SENSEX")
+    default_spot = 80000.0 if is_sensex else 25100.0
+    live_spot = market_engine.sensex_spot if is_sensex else market_engine.nifty_spot
+    spot = req.spot_price or live_spot or default_spot
+    default_spread = 200.0 if is_sensex else 100.0
+    step = 100.0 if is_sensex else 50.0
+    effective_hedge = req.hedge_distance if req.hedge_distance is not None else (req.spread_width or default_spread)
+
     if req.custom_legs and len(req.custom_legs) > 0:
         legs = master.resolve_custom_legs(
             custom_legs=req.custom_legs,
             spot_price=spot,
             default_expiry=req.expiry_code,
-            lots=req.lots or 1
+            lots=req.lots or 1,
+            underlying=u
         )
     else:
         legs = master.build_strategy_legs(
@@ -518,10 +533,11 @@ def preview_strategy(req: StrategyPreviewRequest, user: dict = Depends(get_curre
             spot_price=spot,
             expiry_code=req.expiry_code,
             spread_width=effective_hedge,
-            wing_width=req.wing_width or 300.0,
+            wing_width=req.wing_width or (600.0 if is_sensex else 300.0),
             lots=req.lots or 1,
             main_strike=req.main_strike,
-            hedge_distance=effective_hedge
+            hedge_distance=effective_hedge,
+            underlying=u
         )
 
     # ── Fetch Live Real Quotes from Kotak Neo API if connected ──
@@ -535,7 +551,7 @@ def preview_strategy(req: StrategyPreviewRequest, user: dict = Depends(get_curre
                     return float(leg["price"])
                 tok = str(leg.get("token") or "").strip()
                 sym = str(leg.get("trading_symbol") or "").strip()
-                seg = str(leg.get("exchange_segment") or "nse_fo").strip()
+                seg = str(leg.get("exchange_segment") or ("bse_fo" if is_sensex else "nse_fo")).strip()
                 
                 cached = market_engine.get_option_price(sym, leg.get("strike", 0), leg.get("option_type", ""), tok)
                 if cached > 0:
@@ -563,9 +579,9 @@ def preview_strategy(req: StrategyPreviewRequest, user: dict = Depends(get_curre
     except Exception as e:
         logger.error(f"Error in preview live quote retrieval: {e}")
 
-    payoff = master.compute_payoff_profile(legs, spot)
-    auto_name = master.generate_strategy_name(req.strategy_type, legs)
-    anchor = req.main_strike if req.main_strike is not None else (round(spot / 50.0) * 50.0)
+    payoff = master.compute_payoff_profile(legs, spot, underlying=u)
+    auto_name = master.generate_strategy_name(req.strategy_type, legs, underlying=u)
+    anchor = req.main_strike if req.main_strike is not None else (round(spot / step) * step)
 
     # Fetch live full margin from Kotak Neo API if connected
     margin_req = payoff.get("margin_required")
@@ -650,7 +666,12 @@ def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current
     from backend.instrument_master import InstrumentMaster
     master = InstrumentMaster.get_instance()
 
-    current_spot = market_engine.nifty_spot or 25100.0
+    u = (getattr(req, "underlying", None) or "NIFTY").upper()
+    is_sensex = (u == "SENSEX")
+    default_exchange_seg = "bse_fo" if is_sensex else "nse_fo"
+    default_spot = 80000.0 if is_sensex else 25100.0
+    live_spot = market_engine.sensex_spot if is_sensex else market_engine.nifty_spot
+    current_spot = live_spot or default_spot
     sl_target = req.sl_target_type or "INDEX"
     effective_sl_mode = "CANDLE" if sl_target == "STRATEGY_LTP" else (req.index_sl_mode or "LIVE")
     effective_candle_interval = req.candle_interval if effective_sl_mode == "CANDLE" else 0
@@ -659,15 +680,16 @@ def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current
 
     # Stop-Loss Premature Trigger Safeguard: Prevent deploying with an Index SL that is already breached
     if sl_target == "INDEX":
+        index_label = "SENSEX" if is_sensex else "Nifty"
         if req.index_sl_condition == "LESS_THAN_OR_EQUAL" and req.index_sl_price >= current_spot:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot deploy strategy: For '≤' condition, Stop-Loss price ({req.index_sl_price}) must be strictly below current Nifty Spot ({current_spot}). It would trigger an immediate exit."
+                detail=f"Cannot deploy strategy: For '≤' condition, Stop-Loss price ({req.index_sl_price}) must be strictly below current {index_label} Spot ({current_spot}). It would trigger an immediate exit."
             )
         if req.index_sl_condition == "GREATER_THAN_OR_EQUAL" and req.index_sl_price <= current_spot:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot deploy strategy: For '≥' condition, Stop-Loss price ({req.index_sl_price}) must be strictly above current Nifty Spot ({current_spot}). It would trigger an immediate exit."
+                detail=f"Cannot deploy strategy: For '≥' condition, Stop-Loss price ({req.index_sl_price}) must be strictly above current {index_label} Spot ({current_spot}). It would trigger an immediate exit."
             )
 
     # Auto-resolve tokens, symbols, and entry prices for all legs
@@ -679,15 +701,17 @@ def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current
         # Resolve instrument metadata if token or symbol missing
         token = leg.token
         symbol = leg.trading_symbol
+        seg = getattr(leg, "exchange_segment", None) or default_exchange_seg
         if not token or not symbol:
-            inst = master.resolve_option(leg.strike, leg.option_type, req.expiry_code or leg.expiry)
+            inst = master.resolve_option(leg.strike, leg.option_type, req.expiry_code or leg.expiry, underlying=u)
             if inst:
                 token = inst.token
                 symbol = inst.trading_symbol
                 leg.quantity = leg.quantity or inst.lot_size
+                seg = inst.exchange_segment
             else:
                 token = f"TOKEN_{int(leg.strike)}_{leg.option_type}"
-                symbol = symbol or f"NIFTY{int(leg.strike)}{leg.option_type}"
+                symbol = symbol or f"{u}{int(leg.strike)}{leg.option_type}"
 
         price = leg.entry_price or market_engine.get_option_price(symbol, leg.strike, leg.option_type, token)
         leg.entry_price = price
@@ -705,21 +729,22 @@ def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current
             "action": leg.action,
             "quantity": leg.quantity,
             "entry_price": leg.entry_price,
-            "order_type": leg_ot
+            "order_type": leg_ot,
+            "exchange_segment": seg
         })
 
     # Compute Payoff Profile & Metrics
-    payoff = master.compute_payoff_profile(resolved_legs_info, current_spot)
+    payoff = master.compute_payoff_profile(resolved_legs_info, current_spot, underlying=u)
     final_max_profit = req.max_profit if req.max_profit is not None else payoff.get("max_profit")
     final_max_loss = req.max_loss if req.max_loss is not None else payoff.get("max_loss")
     final_be_low = req.breakeven_low if req.breakeven_low is not None else payoff.get("breakeven_low")
     final_be_high = req.breakeven_high if req.breakeven_high is not None else payoff.get("breakeven_high")
     final_rr = req.risk_reward or payoff.get("risk_reward")
     final_hedge = req.hedge_distance if req.hedge_distance is not None else (
-        abs(resolved_legs_info[0]["strike"] - resolved_legs_info[1]["strike"]) if len(resolved_legs_info) >= 2 else 100.0
+        abs(resolved_legs_info[0]["strike"] - resolved_legs_info[1]["strike"]) if len(resolved_legs_info) >= 2 else (200.0 if is_sensex else 100.0)
     )
 
-    strat_name = req.name.strip() if req.name and req.name.strip() else master.generate_strategy_name(req.strategy_type, resolved_legs_info)
+    strat_name = req.name.strip() if req.name and req.name.strip() else master.generate_strategy_name(req.strategy_type, resolved_legs_info, underlying=u)
     strat_sl_val = req.strategy_sl_value if req.strategy_sl_value is not None else req.index_sl_price
 
     # 1. Save strategy into database
@@ -776,7 +801,7 @@ def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current
                 "quantity": item["quantity"],
                 "price": exec_price,
                 "order_type": leg_ot,
-                "exchange_segment": "nse_fo",
+                "exchange_segment": item.get("exchange_segment") or default_exchange_seg,
                 "product": "NRML"
             })
         conn.commit()

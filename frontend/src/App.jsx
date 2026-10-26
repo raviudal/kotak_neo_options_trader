@@ -22,6 +22,7 @@ export default function App() {
   const [wsConnected, setWsConnected] = useState(false);
   const [kotakStatus, setKotakStatus] = useState(null);
   const [niftyData, setNiftyData] = useState(null);
+  const [sensexData, setSensexData] = useState(null);
   const [liveStrategies, setLiveStrategies] = useState([]);
   const [historicalStrategies, setHistoricalStrategies] = useState([]);
   const [serverHealth, setServerHealth] = useState(null);
@@ -65,6 +66,7 @@ export default function App() {
       (data) => {
         if (data.type === 'MARKET_TICK') {
           if (data.nifty) setNiftyData(data.nifty);
+          if (data.sensex) setSensexData(data.sensex);
           if (data.strategies) setLiveStrategies(data.strategies);
           if (data.server_health) setServerHealth(data.server_health);
           if (data.ltp_cache) setLtpCache(data.ltp_cache);
@@ -228,6 +230,7 @@ export default function App() {
           <div className={`lg:col-span-5 space-y-5 ${mobileTab === 'POSITIONS' ? 'hidden lg:block' : ''}`}>
             <StrategyBuilder
               niftySpot={niftyData?.spot}
+              sensexSpot={sensexData?.spot}
               ltpCache={ltpCache}
               wsClient={wsRef.current}
               kotakStatus={kotakStatus}

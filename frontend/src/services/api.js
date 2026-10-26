@@ -90,9 +90,9 @@ export const api = {
   getOrderLogs: (limit = 100) => apiRequest(`/api/orders/logs?limit=${limit}`),
 
   // Market & Master
-  getExpiries: () => apiRequest("/api/market/expiries"),
-  getStrikes: (expiry) => apiRequest(`/api/market/strikes${expiry ? `?expiry=${expiry}` : ''}`),
-  getOptionChain: (expiry) => apiRequest(`/api/market/chain${expiry ? `?expiry=${expiry}` : ''}`),
+  getExpiries: (underlying = "NIFTY") => apiRequest(`/api/market/expiries?underlying=${encodeURIComponent(underlying)}`),
+  getStrikes: (expiry, underlying = "NIFTY") => apiRequest(`/api/market/strikes?underlying=${encodeURIComponent(underlying)}${expiry ? `&expiry=${encodeURIComponent(expiry)}` : ''}`),
+  getOptionChain: (expiry, underlying = "NIFTY") => apiRequest(`/api/market/chain?underlying=${encodeURIComponent(underlying)}${expiry ? `&expiry=${encodeURIComponent(expiry)}` : ''}`),
   refreshMaster: () => apiRequest("/api/market/refresh-master", { method: "POST" }),
 
   // System & Server Health

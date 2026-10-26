@@ -373,6 +373,34 @@ class KotakNeoManager:
             logger.error(f"Error fetching live Nifty quote: {e}")
         return None
 
+    def get_sensex_quote(self) -> Optional[Dict[str, Any]]:
+        """Fetches live real-time quote for SENSEX from Kotak Neo REST quote API"""
+        if not self.is_connected or not self.trade_token:
+            return None
+        try:
+            url = f"{self.base_url}script-details/1.0/quotes/neosymbol/bse_cm%7CSENSEX"
+            r = requests.get(url, headers=self.get_auth_headers(is_quote=True), timeout=4)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and len(data) > 0:
+                    item = data[0]
+                    ohlc = item.get("ohlc", {})
+                    return {
+                        "symbol": "SENSEX",
+                        "spot": float(item.get("ltp", 0)),
+                        "change": float(item.get("change", 0)),
+                        "pct_change": float(item.get("per_change", 0)),
+                        "open": float(ohlc.get("open", 0)),
+                        "high": float(ohlc.get("high", 0)),
+                        "low": float(ohlc.get("low", 0)),
+                        "prev_close": float(ohlc.get("close", 0)),
+                        "is_live": True,
+                        "timestamp": datetime.now().isoformat()
+                    }
+        except Exception as e:
+            logger.error(f"Error fetching live SENSEX quote: {e}")
+        return None
+
     def _probe_live_available_margin(self) -> Optional[float]:
         """Probes /quick/user/check-margin to read real live avlMrgn / avlCash from Kotak Neo broker RMS"""
         try:
@@ -506,6 +534,9 @@ class KotakNeoManager:
             seg = str(leg.get("exchange_segment") or "nse_fo")
             prod = str(leg.get("product") or "NRML")
             tok = str(leg.get("token") or "")
+            is_bse = (seg.lower() == "bse_fo")
+            lot_div = 20.0 if is_bse else 65.0
+            naked_base = 150000.0 if is_bse else 125000.0
 
             try:
                 payload = {
@@ -534,7 +565,7 @@ class KotakNeoManager:
                     req_mrgn = float(data.get("reqdMrgn") or data.get("ordMrgn") or 0.0)
                     if req_mrgn <= 0.0:
                         if action == "S":
-                            req_mrgn = 125000.0 * (int(qty) / 65.0)
+                            req_mrgn = naked_base * (int(qty) / lot_div)
                         else:
                             req_mrgn = float(price) * int(qty)
 
@@ -560,7 +591,7 @@ class KotakNeoManager:
                     })
                 else:
                     if action == "S":
-                        fb = 125000.0 * (int(qty) / 65.0)
+                        fb = naked_base * (int(qty) / lot_div)
                         sell_margin += fb
                         sell_prem += float(price) * int(qty)
                     else:
@@ -569,7 +600,7 @@ class KotakNeoManager:
             except Exception as e:
                 logger.warning(f"Error checking margin on Kotak for leg {leg}: {e}")
                 if action == "S":
-                    fb = 125000.0 * (int(qty) / 65.0)
+                    fb = naked_base * (int(qty) / lot_div)
                     sell_margin += fb
                     sell_prem += float(price) * int(qty)
                 else:

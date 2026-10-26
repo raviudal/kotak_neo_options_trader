@@ -25,6 +25,15 @@ class MarketEngine:
         self.nifty_change = 0.0
         self.nifty_pct_change = 0.0
         self.last_tick_time = 0
+
+        # Real Live SENSEX Spot state (BSE)
+        self.sensex_spot = 0.0
+        self.sensex_open = 0.0
+        self.sensex_high = 0.0
+        self.sensex_low = 0.0
+        self.sensex_prev_close = 0.0
+        self.sensex_change = 0.0
+        self.sensex_pct_change = 0.0
         
         # Option Chain Real LTP Cache {strike: {'CE': {...}, 'PE': {...}}}
         self.option_chain: Dict[int, Dict[str, Any]] = {}
@@ -268,8 +277,26 @@ class MarketEngine:
                 token = str(pkt.get("tk") or pkt.get("instrument_token") or "")
                 symbol = pkt.get("ts") or pkt.get("trading_symbol") or ""
 
-                # 1. Nifty 50 Index Spot tick (token '26000' or segment 'nse_cm' index)
-                if token == "26000" or "nifty 50" in symbol.lower() or pkt.get("isIndex"):
+                # 1. SENSEX Index Spot tick (token '1' in BSE or 'sensex' in symbol)
+                if token == "1" or symbol.lower() == "sensex" or "bse_cm|sensex" in symbol.lower():
+                    if raw_ltp is not None:
+                        new_spot = float(raw_ltp)
+                        if new_spot > 0:
+                            self.sensex_spot = round(new_spot, 2)
+                            self.is_live = True
+                            self.last_tick_time = time.time()
+                            if pkt.get("h"): self.sensex_high = float(pkt.get("h"))
+                            if pkt.get("l"): self.sensex_low = float(pkt.get("l"))
+                            if pkt.get("o"): self.sensex_open = float(pkt.get("o"))
+                            if pkt.get("c"): self.sensex_prev_close = float(pkt.get("c"))
+                            if pkt.get("cng"): self.sensex_change = float(pkt.get("cng"))
+                            if pkt.get("nc"): self.sensex_pct_change = float(pkt.get("nc"))
+                            elif self.sensex_prev_close > 0:
+                                self.sensex_change = round(self.sensex_spot - self.sensex_prev_close, 2)
+                                self.sensex_pct_change = round((self.sensex_change / self.sensex_prev_close) * 100, 2)
+
+                # 2. Nifty 50 Index Spot tick (token '26000' or segment 'nse_cm' index)
+                elif token == "26000" or "nifty 50" in symbol.lower() or pkt.get("isIndex"):
                     if raw_ltp is not None:
                         new_spot = float(raw_ltp)
                         if new_spot > 0:
@@ -300,7 +327,7 @@ class MarketEngine:
                                 except Exception as err:
                                     logger.error(f"Error evaluating SL in fallback: {err}")
 
-                # 2. Option contract tick
+                # 3. Option contract tick
                 elif raw_ltp is not None and (symbol or token):
                     ltp_val = float(raw_ltp)
                     if symbol:
@@ -422,6 +449,18 @@ class MarketEngine:
                 "high": self.nifty_high,
                 "low": self.nifty_low,
                 "prev_close": self.nifty_prev_close,
+                "is_live": self.is_live,
+                "last_tick_time": self.last_tick_time
+            },
+            "sensex": {
+                "symbol": "SENSEX",
+                "spot": self.sensex_spot,
+                "change": self.sensex_change,
+                "pct_change": self.sensex_pct_change,
+                "open": self.sensex_open,
+                "high": self.sensex_high,
+                "low": self.sensex_low,
+                "prev_close": self.sensex_prev_close,
                 "is_live": self.is_live,
                 "last_tick_time": self.last_tick_time
             },
@@ -633,7 +672,7 @@ class MarketEngine:
                     from backend.kotak_service import KotakNeoManager
                     manager = KotakNeoManager.get_instance(1)
                     if manager.is_connected:
-                        # 1. Fetch Nifty 50 Index quote
+                        # 1. Fetch Nifty 50 and SENSEX Index quotes
                         quote = await asyncio.to_thread(manager.get_nifty_quote)
                         if quote and quote.get("spot", 0) > 0:
                             self.nifty_spot = quote["spot"]
@@ -647,6 +686,17 @@ class MarketEngine:
                             self.last_tick_time = time.time()
                             await self.evaluate_index_stop_loss()
                             self._update_candle_state(self.nifty_spot)
+
+                        sensex_q = await asyncio.to_thread(manager.get_sensex_quote)
+                        if sensex_q and sensex_q.get("spot", 0) > 0:
+                            self.sensex_spot = sensex_q["spot"]
+                            self.sensex_change = sensex_q["change"]
+                            self.sensex_pct_change = sensex_q["pct_change"]
+                            self.sensex_open = sensex_q["open"]
+                            self.sensex_high = sensex_q["high"]
+                            self.sensex_low = sensex_q["low"]
+                            self.sensex_prev_close = sensex_q["prev_close"]
+                            self.is_live = True
 
                         # 2. Fetch live quotes for all legs (active strategies + strategy builder preview)
                         watched_legs = self.get_all_watched_legs()

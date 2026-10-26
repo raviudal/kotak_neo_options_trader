@@ -10,28 +10,29 @@ from pathlib import Path
 logger = logging.getLogger("instrument_master")
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-SCRIP_CSV_PATH = DATA_DIR / "scrip_nse_fo.csv"
+SCRIP_NSE_PATH = DATA_DIR / "scrip_nse_fo.csv"
+SCRIP_BSE_PATH = DATA_DIR / "scrip_bse_fo.csv"
+SCRIP_CSV_PATH = SCRIP_NSE_PATH  # Backwards compatibility
 
-def is_scrip_updated_today() -> bool:
-    """Checks if the local scrip_nse_fo.csv exists, is valid size, and was modified today"""
-    if not SCRIP_CSV_PATH.exists() or SCRIP_CSV_PATH.stat().st_size < 100000:
+def is_scrip_updated_today(segment: str = "nse_fo") -> bool:
+    """Checks if the local scrip CSV file exists, is valid size, and was modified today"""
+    target = SCRIP_BSE_PATH if segment == "bse_fo" else SCRIP_NSE_PATH
+    if not target.exists() or target.stat().st_size < 100000:
         return False
     try:
-        mtime = datetime.fromtimestamp(SCRIP_CSV_PATH.stat().st_mtime)
+        mtime = datetime.fromtimestamp(target.stat().st_mtime)
         return mtime.date() == datetime.now().date()
     except Exception:
         return False
 
-def download_scrip_csv(consumer_key: Optional[str] = None) -> bool:
+def download_scrip_csv(consumer_key: Optional[str] = None, segment: str = "nse_fo") -> bool:
     """
-    Downloads the daily updated NSE F&O scrip master from Kotak Neo.
-    1. Queries Kotak Neo API /script-details/1.0/masterscrip/file-paths if consumer_key is available.
-    2. Uses official daily date-stamped Kotak CDN endpoints (today / yesterday fallback).
-    3. Uses legacy static fallback endpoints.
+    Downloads the daily updated F&O scrip master from Kotak Neo for NSE (nse_fo) or BSE (bse_fo).
     """
     import requests
     today_str = datetime.now().strftime("%Y-%m-%d")
     yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    target_path = SCRIP_BSE_PATH if segment == "bse_fo" else SCRIP_NSE_PATH
 
     candidate_urls: List[str] = []
 
@@ -45,41 +46,41 @@ def download_scrip_csv(consumer_key: Optional[str] = None) -> bool:
 
     if consumer_key:
         try:
-            logger.info("Querying Kotak Neo API for daily masterscrip file paths...")
+            logger.info(f"Querying Kotak Neo API for daily {segment} masterscrip file paths...")
             api_url = "https://e41.kotaksecurities.com/script-details/1.0/masterscrip/file-paths"
             headers = {"Authorization": consumer_key, "neo-fin-key": "neotradeapi"}
             res = requests.get(api_url, headers=headers, timeout=8)
             if res.status_code == 200:
                 data = res.json().get("data", {})
                 for path in data.get("filesPaths", []):
-                    if "nse_fo" in path.lower():
+                    if segment in path.lower():
                         candidate_urls.append(path)
-                        logger.info(f"Discovered official daily Kotak scrip URL: {path}")
+                        logger.info(f"Discovered official daily Kotak scrip URL for {segment}: {path}")
         except Exception as e:
-            logger.warning(f"Kotak Neo API masterscrip discovery fallback: {e}")
+            logger.warning(f"Kotak Neo API masterscrip discovery fallback for {segment}: {e}")
 
     # 2. Known official Kotak CDN endpoints with daily date-stamp
     candidate_urls.extend([
-        f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{today_str}/transformed/nse_fo.csv",
-        f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{today_str}/nse_fo.csv",
-        f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{yesterday_str}/transformed/nse_fo.csv",
-        "https://lapi.kotaksecurities.com/content/files/scrip_nse_fo.csv",
-        "https://scripfile.kotaksecurities.com/nse_fo.csv"
+        f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{today_str}/transformed/{segment}.csv",
+        f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{today_str}/{segment}.csv",
+        f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{yesterday_str}/transformed/{segment}.csv",
+        f"https://lapi.kotaksecurities.com/content/files/scrip_{segment}.csv",
+        f"https://scripfile.kotaksecurities.com/{segment}.csv"
     ])
 
     for url in candidate_urls:
         try:
-            logger.info(f"Downloading daily scrip master from: {url}")
+            logger.info(f"Downloading daily {segment} scrip master from: {url}")
             r = requests.get(url, timeout=30, stream=True)
             if r.status_code == 200:
-                temp_path = SCRIP_CSV_PATH.with_suffix(".csv.tmp")
+                temp_path = target_path.with_suffix(".csv.tmp")
                 with open(temp_path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=1024 * 1024):
                         if chunk:
                             f.write(chunk)
                 if temp_path.stat().st_size > 500000:
-                    temp_path.replace(SCRIP_CSV_PATH)
-                    logger.info(f"Successfully updated scrip_nse_fo.csv ({SCRIP_CSV_PATH.stat().st_size} bytes)")
+                    temp_path.replace(target_path)
+                    logger.info(f"Successfully updated {target_path.name} ({target_path.stat().st_size} bytes)")
                     return True
         except Exception as e:
             logger.debug(f"Failed download from {url}: {e}")
@@ -87,7 +88,7 @@ def download_scrip_csv(consumer_key: Optional[str] = None) -> bool:
     return False
 
 class Instrument:
-    def __init__(self, token: str, symbol: str, strike: float, option_type: str, expiry_code: str, expiry_date: str, lot_size: int = 65, tick_size: float = 0.05):
+    def __init__(self, token: str, symbol: str, strike: float, option_type: str, expiry_code: str, expiry_date: str, lot_size: int = 65, tick_size: float = 0.05, underlying: str = "NIFTY", exchange_segment: str = "nse_fo"):
         self.token = token
         self.trading_symbol = symbol
         self.strike = strike
@@ -96,6 +97,8 @@ class Instrument:
         self.expiry_date = expiry_date
         self.lot_size = lot_size
         self.tick_size = tick_size
+        self.underlying = underlying.upper()
+        self.exchange_segment = exchange_segment
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -106,7 +109,9 @@ class Instrument:
             "expiry_code": self.expiry_code,
             "expiry_date": self.expiry_date,
             "lot_size": self.lot_size,
-            "tick_size": self.tick_size
+            "tick_size": self.tick_size,
+            "underlying": self.underlying,
+            "exchange_segment": self.exchange_segment
         }
 
 class InstrumentMaster:
@@ -116,14 +121,17 @@ class InstrumentMaster:
         self.instruments_by_token: Dict[str, Instrument] = {}
         self.instruments_by_symbol: Dict[str, Instrument] = {}
         
-        # Structure: (expiry_code, strike, option_type) -> Instrument
+        # Structure: (underlying, expiry_code, strike, option_type) -> Instrument
+        # AND backwards compatible: (expiry_code, strike, option_type) -> Instrument
         self.lookup_map: Dict[tuple, Instrument] = {}
         
-        # Expiry metadata: code -> {"code": code, "date": "YYYY-MM-DD", "display": "19-Oct-2026", "dt": datetime}
-        self.expiries: Dict[str, Dict[str, Any]] = {}
+        # Partitioned by underlying: "NIFTY" and "SENSEX"
+        self.expiries: Dict[str, Dict[str, Dict[str, Any]]] = {"NIFTY": {}, "SENSEX": {}}
+        self.strikes_by_expiry: Dict[str, Dict[str, List[float]]] = {"NIFTY": {}, "SENSEX": {}}
         
-        # Expiry -> sorted list of strikes
-        self.strikes_by_expiry: Dict[str, List[float]] = {}
+        self.lot_sizes: Dict[str, int] = {"NIFTY": 65, "SENSEX": 20}
+        self.strike_steps: Dict[str, float] = {"NIFTY": 50.0, "SENSEX": 100.0}
+        self.default_hedges: Dict[str, float] = {"NIFTY": 100.0, "SENSEX": 200.0}
         
         self.is_loaded = False
         self.load_master()
@@ -134,47 +142,18 @@ class InstrumentMaster:
             cls._instance = cls()
         return cls._instance
 
-    def load_master(self, force_reload: bool = False, consumer_key: Optional[str] = None):
-        """
-        Loads the scrip master into memory.
-        If force_reload is True or the local file is not from today, downloads today's copy first.
-        """
-        target_path = None
-
-        # Check if file needs download for today
-        if force_reload or not is_scrip_updated_today():
-            logger.info("Scrip master is missing or older than today. Downloading fresh copy from Kotak Neo...")
-            if download_scrip_csv(consumer_key=consumer_key) and SCRIP_CSV_PATH.exists():
-                target_path = SCRIP_CSV_PATH
-
-        if not target_path and SCRIP_CSV_PATH.exists() and SCRIP_CSV_PATH.stat().st_size > 100000:
-            target_path = SCRIP_CSV_PATH
-
-        if not target_path:
-            logger.warning(f"No scrip master file found at {SCRIP_CSV_PATH}. Option chain and strikes resolution may be limited until scrip_nse_fo.csv is present in data/.")
-            return
-
-        # Clear existing mappings before reloading fresh contracts
-        self.instruments_by_token.clear()
-        self.instruments_by_symbol.clear()
-        self.lookup_map.clear()
-        self.expiries.clear()
-        self.strikes_by_expiry.clear()
-
-        logger.info(f"Loading NIFTY option instruments from {target_path}...")
+    def _parse_nse_csv(self, file_path: Path):
+        count = 0
         try:
-            with open(target_path, mode="r", encoding="utf-8", errors="ignore") as f:
+            with open(file_path, mode="r", encoding="utf-8", errors="ignore") as f:
                 reader = csv.DictReader(f)
-                count = 0
                 for row in reader:
-                    # Filter for NIFTY Index Options
-                    if row.get("pSymbolName") == "NIFTY" and row.get("pInstType") == "OPTIDX":
+                    if row.get("pSymbolName") == "NIFTY" and row.get("pInstType") in ["OPTIDX", "IO"]:
                         token = (row.get("pSymbol") or "").strip()
                         trd_sym = (row.get("pTrdSymbol") or "").strip()
                         opt_type = (row.get("pOptionType") or "").strip().upper()
                         ref_key = (row.get("pScripRefKey") or "").strip()
 
-                        # Extract Strike (in Kotak scrip CSV, values >= 10000 are in paise e.g. 2500000 -> 25000.0)
                         raw_strike = row.get("dStrikePrice;") or row.get("dStrikePrice") or "0"
                         try:
                             strike = float(raw_strike)
@@ -184,13 +163,11 @@ class InstrumentMaster:
                         except Exception:
                             continue
 
-                        # Extract Expiry Code from RefKey (e.g. NIFTY19OCT2620850.00PE -> 19OCT26)
                         exp_code = ""
                         m = re.search(r"NIFTY(\d{2}[A-Z]{3}\d{2})", ref_key)
                         if m:
                             exp_code = m.group(1).upper()
                         else:
-                            # Fallback from trading symbol
                             m_sym = re.match(r"NIFTY(\d{2}[A-Z0-9]{3,4})", trd_sym)
                             if m_sym:
                                 exp_code = m_sym.group(1).upper()
@@ -198,9 +175,7 @@ class InstrumentMaster:
                         if not exp_code:
                             continue
 
-                        # Parse Expiry Date object
                         try:
-                            # e.g. 19OCT26 -> 2026-10-19
                             dt = datetime.strptime(exp_code, "%d%b%y")
                             date_str = dt.strftime("%Y-%m-%d")
                             display_str = dt.strftime("%d %b %Y")
@@ -209,18 +184,10 @@ class InstrumentMaster:
                             display_str = exp_code
                             dt = datetime.max
 
-                        # Lot size & Tick size
                         try:
                             lot_size = int(row.get("lLotSize") or row.get("iLotSize") or 65)
                         except Exception:
                             lot_size = 65
-
-                        try:
-                            tick_size = float(row.get("dTickSize ") or row.get("dTickSize") or 5)
-                            if tick_size >= 1.0:
-                                tick_size = tick_size / 100.0
-                        except Exception:
-                            tick_size = 0.05
 
                         inst = Instrument(
                             token=token,
@@ -230,102 +197,235 @@ class InstrumentMaster:
                             expiry_code=exp_code,
                             expiry_date=date_str,
                             lot_size=lot_size,
-                            tick_size=tick_size
+                            tick_size=0.05,
+                            underlying="NIFTY",
+                            exchange_segment="nse_fo"
                         )
 
                         self.instruments_by_token[token] = inst
                         self.instruments_by_symbol[trd_sym] = inst
-                        self.lookup_map[(exp_code, strike, opt_type)] = inst
+                        self.lookup_map[("NIFTY", exp_code, strike, opt_type)] = inst
+                        self.lookup_map[(exp_code, strike, opt_type)] = inst  # Backwards compatibility
 
-                        if exp_code not in self.expiries:
-                            self.expiries[exp_code] = {
+                        if exp_code not in self.expiries["NIFTY"]:
+                            self.expiries["NIFTY"][exp_code] = {
                                 "code": exp_code,
                                 "date": date_str,
                                 "display": display_str,
                                 "dt": dt
                             }
 
-                        if exp_code not in self.strikes_by_expiry:
-                            self.strikes_by_expiry[exp_code] = []
-                        if strike not in self.strikes_by_expiry[exp_code]:
-                            self.strikes_by_expiry[exp_code].append(strike)
+                        if exp_code not in self.strikes_by_expiry["NIFTY"]:
+                            self.strikes_by_expiry["NIFTY"][exp_code] = []
+                        if strike not in self.strikes_by_expiry["NIFTY"][exp_code]:
+                            self.strikes_by_expiry["NIFTY"][exp_code].append(strike)
 
                         count += 1
 
-                for exp_code in self.strikes_by_expiry:
-                    self.strikes_by_expiry[exp_code].sort()
+                for exp_code in self.strikes_by_expiry["NIFTY"]:
+                    self.strikes_by_expiry["NIFTY"][exp_code].sort()
 
-            self.is_loaded = True
-            logger.info(f"Loaded {count} NIFTY instruments across {len(self.expiries)} expiries.")
+            logger.info(f"Loaded {count} NIFTY instruments across {len(self.expiries['NIFTY'])} expiries from NSE.")
         except Exception as e:
-            logger.error(f"Error parsing scrip master CSV: {e}")
+            logger.error(f"Error parsing NSE scrip master CSV: {e}")
+
+    def _parse_bse_csv(self, file_path: Path):
+        count = 0
+        try:
+            with open(file_path, mode="r", encoding="utf-8", errors="ignore") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get("pSymbolName") == "SENSEX" and row.get("pInstType") in ["IO", "OPTIDX"]:
+                        token = (row.get("pSymbol") or "").strip()
+                        trd_sym = (row.get("pTrdSymbol") or "").strip()
+                        opt_type = (row.get("pOptionType") or "").strip().upper()
+                        ref_key = (row.get("pScripRefKey") or "").strip()
+
+                        raw_strike = row.get("dStrikePrice;") or row.get("dStrikePrice") or "0"
+                        try:
+                            strike = float(raw_strike)
+                            if strike >= 10000:
+                                strike = strike / 100.0
+                            strike = round(strike, 2)
+                        except Exception:
+                            continue
+
+                        exp_code = ""
+                        m = re.search(r"SENSEX(\d{2}[A-Z]{3}\d{2})", ref_key)
+                        if m:
+                            exp_code = m.group(1).upper()
+                        else:
+                            m_sym = re.match(r"SENSEX(\d{2}[A-Z0-9]{3,4})", trd_sym)
+                            if m_sym:
+                                exp_code = m_sym.group(1).upper()
+
+                        if not exp_code:
+                            continue
+
+                        try:
+                            dt = datetime.strptime(exp_code, "%d%b%y")
+                            date_str = dt.strftime("%Y-%m-%d")
+                            display_str = dt.strftime("%d %b %Y")
+                        except Exception:
+                            date_str = exp_code
+                            display_str = exp_code
+                            dt = datetime.max
+
+                        try:
+                            lot_size = int(row.get("lLotSize") or row.get("iLotSize") or 20)
+                        except Exception:
+                            lot_size = 20
+
+                        inst = Instrument(
+                            token=token,
+                            symbol=trd_sym,
+                            strike=strike,
+                            option_type=opt_type,
+                            expiry_code=exp_code,
+                            expiry_date=date_str,
+                            lot_size=lot_size,
+                            tick_size=0.05,
+                            underlying="SENSEX",
+                            exchange_segment="bse_fo"
+                        )
+
+                        self.instruments_by_token[token] = inst
+                        self.instruments_by_symbol[trd_sym] = inst
+                        self.lookup_map[("SENSEX", exp_code, strike, opt_type)] = inst
+
+                        if exp_code not in self.expiries["SENSEX"]:
+                            self.expiries["SENSEX"][exp_code] = {
+                                "code": exp_code,
+                                "date": date_str,
+                                "display": display_str,
+                                "dt": dt
+                            }
+
+                        if exp_code not in self.strikes_by_expiry["SENSEX"]:
+                            self.strikes_by_expiry["SENSEX"][exp_code] = []
+                        if strike not in self.strikes_by_expiry["SENSEX"][exp_code]:
+                            self.strikes_by_expiry["SENSEX"][exp_code].append(strike)
+
+                        count += 1
+
+                for exp_code in self.strikes_by_expiry["SENSEX"]:
+                    self.strikes_by_expiry["SENSEX"][exp_code].sort()
+
+            logger.info(f"Loaded {count} SENSEX instruments across {len(self.expiries['SENSEX'])} expiries from BSE.")
+        except Exception as e:
+            logger.error(f"Error parsing BSE scrip master CSV: {e}")
+
+    def load_master(self, force_reload: bool = False, consumer_key: Optional[str] = None):
+        """
+        Loads both NSE F&O (NIFTY) and BSE F&O (SENSEX) scrip masters into memory.
+        """
+        if force_reload or not is_scrip_updated_today("nse_fo"):
+            logger.info("NSE F&O scrip master is missing or older than today. Downloading fresh copy from Kotak Neo...")
+            download_scrip_csv(consumer_key=consumer_key, segment="nse_fo")
+
+        if force_reload or not is_scrip_updated_today("bse_fo"):
+            logger.info("BSE F&O scrip master is missing or older than today. Downloading fresh copy from Kotak Neo...")
+            download_scrip_csv(consumer_key=consumer_key, segment="bse_fo")
+
+        self.instruments_by_token.clear()
+        self.instruments_by_symbol.clear()
+        self.lookup_map.clear()
+        self.expiries = {"NIFTY": {}, "SENSEX": {}}
+        self.strikes_by_expiry = {"NIFTY": {}, "SENSEX": {}}
+
+        # 1. Load NIFTY from scrip_nse_fo.csv
+        if SCRIP_NSE_PATH.exists() and SCRIP_NSE_PATH.stat().st_size > 100000:
+            self._parse_nse_csv(SCRIP_NSE_PATH)
+        elif SCRIP_CSV_PATH.exists() and SCRIP_CSV_PATH.stat().st_size > 100000:
+            self._parse_nse_csv(SCRIP_CSV_PATH)
+
+        # 2. Load SENSEX from scrip_bse_fo.csv
+        if SCRIP_BSE_PATH.exists() and SCRIP_BSE_PATH.stat().st_size > 100000:
+            self._parse_bse_csv(SCRIP_BSE_PATH)
+
+        self.is_loaded = True
 
     def ensure_today_master(self, force: bool = False, consumer_key: Optional[str] = None) -> bool:
         """
         Ensures the token master is up-to-date for today (first login of the day).
-        If today's scrip master is not yet downloaded, downloads it and reloads all instruments.
         """
-        if not force and is_scrip_updated_today() and self.is_loaded:
+        if not force and is_scrip_updated_today("nse_fo") and is_scrip_updated_today("bse_fo") and self.is_loaded:
             logger.info("Token master is already up-to-date for today's trading session.")
             return True
 
-        logger.info("Updating token master for today's trading session...")
+        logger.info("Updating token master for today's trading session (NSE & BSE)...")
         self.load_master(force_reload=True, consumer_key=consumer_key)
         return self.is_loaded
 
-    def get_sorted_expiries(self) -> List[Dict[str, Any]]:
+    def get_sorted_expiries(self, underlying: str = "NIFTY") -> List[Dict[str, Any]]:
         """Returns sorted list of active future (or today's) expiries, omitting expired dates"""
+        u = underlying.upper() if underlying else "NIFTY"
         today = datetime.now().date()
+        exp_dict = self.expiries.get(u, {})
         # Filter out expired contracts strictly prior to today
-        exp_list = [e for e in self.expiries.values() if e["dt"].date() >= today]
+        exp_list = [e for e in exp_dict.values() if e["dt"].date() >= today]
         exp_list.sort(key=lambda x: x["dt"])
         return [
             {
                 "code": e["code"],
                 "date": e["date"],
-                "display": f"{e['display']} ({'Weekly' if e['dt'].day not in [24,25,26,27,28,29,30,31] or e['dt'].weekday() != 3 else 'Monthly'})"
+                "display": f"{e['display']} ({'Weekly' if e['dt'].day not in [24,25,26,27,28,29,30,31] or e['dt'].weekday() not in [3, 4] else 'Monthly'})"
             }
             for e in exp_list
         ]
 
-    def get_strikes(self, expiry_code: Optional[str] = None) -> List[float]:
-        """Returns sorted list of available strike prices for given expiry"""
+    def get_strikes(self, expiry_code: Optional[str] = None, underlying: str = "NIFTY") -> List[float]:
+        """Returns sorted list of available strike prices for given expiry and underlying"""
+        u = underlying.upper() if underlying else "NIFTY"
+        strikes_map = self.strikes_by_expiry.get(u, {})
         if not expiry_code:
-            expiries = self.get_sorted_expiries()
+            expiries = self.get_sorted_expiries(underlying=u)
             if not expiries:
                 return []
             expiry_code = expiries[0]["code"]
-        return self.strikes_by_expiry.get(expiry_code.upper(), [])
+        return strikes_map.get(expiry_code.upper(), [])
 
-    def resolve_option(self, strike: float, option_type: str, expiry_code: Optional[str] = None) -> Optional[Instrument]:
-        """Resolves exact Instrument for strike, CE/PE, and expiry"""
+    def resolve_option(self, strike: float, option_type: str, expiry_code: Optional[str] = None, underlying: str = "NIFTY") -> Optional[Instrument]:
+        """Resolves exact Instrument for strike, CE/PE, expiry, and underlying (NIFTY/SENSEX)"""
+        u = underlying.upper() if underlying else "NIFTY"
         if not expiry_code:
-            expiries = self.get_sorted_expiries()
-            if not expiries:
+            exp = self.get_sorted_expiries(underlying=u)
+            if not exp:
                 return None
-            expiry_code = expiries[0]["code"]
+            expiry_code = exp[0]["code"]
 
         exp_code = expiry_code.upper()
         opt_type = option_type.upper()
         stk = round(float(strike), 2)
 
-        key = (exp_code, stk, opt_type)
-        if key in self.lookup_map:
-            return self.lookup_map[key]
+        key_underlying = (u, exp_code, stk, opt_type)
+        if key_underlying in self.lookup_map:
+            return self.lookup_map[key_underlying]
 
-        # Try nearest strike match within 2 points if exact not found
-        available = self.strikes_by_expiry.get(exp_code, [])
+        # Check generic lookup for Nifty backwards-compatibility
+        if u == "NIFTY":
+            key_generic = (exp_code, stk, opt_type)
+            if key_generic in self.lookup_map:
+                return self.lookup_map[key_generic]
+
+        # Try nearest strike match within 2.5 points if exact not found
+        available = self.strikes_by_expiry.get(u, {}).get(exp_code, [])
         for s in available:
-            if abs(s - stk) <= 2.0:
-                alt_key = (exp_code, s, opt_type)
+            if abs(s - stk) <= 2.5:
+                alt_key = (u, exp_code, s, opt_type)
                 if alt_key in self.lookup_map:
                     return self.lookup_map[alt_key]
+                if u == "NIFTY":
+                    alt_key_gen = (exp_code, s, opt_type)
+                    if alt_key_gen in self.lookup_map:
+                        return self.lookup_map[alt_key_gen]
 
         return None
 
-    def get_option_chain_snapshot(self, spot_price: float, expiry_code: Optional[str] = None, strike_count: int = 10) -> Dict[str, Any]:
-        """Returns chain centered around ATM for the selected expiry"""
-        expiries = self.get_sorted_expiries()
+    def get_option_chain_snapshot(self, spot_price: float, expiry_code: Optional[str] = None, strike_count: int = 10, underlying: str = "NIFTY") -> Dict[str, Any]:
+        """Returns chain centered around ATM for the selected expiry and underlying"""
+        u = underlying.upper() if underlying else "NIFTY"
+        expiries = self.get_sorted_expiries(underlying=u)
         if not expiries:
             return {"expiry": None, "strikes": [], "chain": []}
 
@@ -333,7 +433,7 @@ class InstrumentMaster:
             expiry_code = expiries[0]["code"]
 
         exp_code = expiry_code.upper()
-        strikes = self.strikes_by_expiry.get(exp_code, [])
+        strikes = self.strikes_by_expiry.get(u, {}).get(exp_code, [])
         if not strikes:
             return {"expiry": exp_code, "strikes": [], "chain": []}
 
@@ -347,8 +447,8 @@ class InstrumentMaster:
 
         chain = []
         for stk in selected_strikes:
-            ce_inst = self.lookup_map.get((exp_code, stk, "CE"))
-            pe_inst = self.lookup_map.get((exp_code, stk, "PE"))
+            ce_inst = self.lookup_map.get((u, exp_code, stk, "CE")) or self.lookup_map.get((exp_code, stk, "CE"))
+            pe_inst = self.lookup_map.get((u, exp_code, stk, "PE")) or self.lookup_map.get((exp_code, stk, "PE"))
             chain.append({
                 "strike": stk,
                 "is_atm": (stk == atm_strike),
@@ -369,16 +469,19 @@ class InstrumentMaster:
         spot_price: float,
         strike: float,
         option_type: str,
-        expiry_code: Optional[str] = None
+        expiry_code: Optional[str] = None,
+        underlying: str = "NIFTY"
     ) -> float:
         """
         Calculates realistic, expiry-aware option premium based on Black-Scholes volatility time-decay.
-        Properly differentiates between near-week, next-week, and monthly expiries.
+        Properly differentiates between near-week, next-week, and monthly expiries for both NIFTY and SENSEX.
         """
+        u = underlying.upper() if underlying else "NIFTY"
         exp_code = str(expiry_code or "").upper()
         dte = 2.0  # fallback
-        if exp_code and exp_code in self.expiries:
-            exp_info = self.expiries[exp_code]
+        exp_dict = self.expiries.get(u, {})
+        if exp_code and exp_code in exp_dict:
+            exp_info = exp_dict[exp_code]
             exp_dt = exp_info.get("dt")
             if exp_dt:
                 from datetime import date
@@ -387,13 +490,13 @@ class InstrumentMaster:
                 diff = (exp_date - cur_date).days
                 dte = max(0.35, float(diff) + 0.35)
 
-        # ATM extrinsic time value scales with sqrt(T)
-        # Nifty ATM: 1-day ~ 36 pts, 8-day ~ 100 pts, 15-day ~ 138 pts, 30-day ~ 195 pts
-        atm_extrinsic = max(6.0, 36.0 * math.sqrt(dte))
+        # Scale ATM extrinsic and curve width by spot level (e.g. SENSEX ~80k vs NIFTY ~24k)
+        scale = max(0.5, spot_price / 24000.0)
+        atm_extrinsic = max(6.0 * scale, 36.0 * scale * math.sqrt(dte))
         
-        # Bell curve width scales with DTE (further out expiry has wider strike sensitivity)
+        # Bell curve width scales with DTE and spot
         dist = abs(spot_price - strike)
-        curve_width = 160.0 + 20.0 * math.sqrt(dte)
+        curve_width = (160.0 + 20.0 * math.sqrt(dte)) * scale
         time_val = max(1.5, atm_extrinsic * math.exp(-0.5 * ((dist / curve_width) ** 2)))
 
         if option_type.upper() == "CE":
@@ -408,102 +511,96 @@ class InstrumentMaster:
         strategy_type: str,
         spot_price: float,
         expiry_code: Optional[str] = None,
-        spread_width: float = 100.0,
-        wing_width: float = 300.0,
+        spread_width: Optional[float] = None,
+        wing_width: Optional[float] = None,
         lots: int = 1,
         main_strike: Optional[float] = None,
-        hedge_distance: Optional[float] = None
+        hedge_distance: Optional[float] = None,
+        underlying: str = "NIFTY"
     ) -> List[Dict[str, Any]]:
         """
         Builds properly sequenced and resolved strategy legs with exact Kotak tokens and symbols.
         Supports customizable main strike and hedge distance (Sensibull style).
-        BUY legs are placed first for margin reduction.
+        BUY legs are placed first for margin reduction. Supports both NIFTY (NSE) and SENSEX (BSE).
         """
-        expiries = self.get_sorted_expiries()
+        u = underlying.upper() if underlying else "NIFTY"
+        step = 100.0 if u == "SENSEX" else 50.0
+        default_lot_size = 20 if u == "SENSEX" else 65
+        default_spread = 200.0 if u == "SENSEX" else 100.0
+        exchange_seg = "bse_fo" if u == "SENSEX" else "nse_fo"
+
+        expiries = self.get_sorted_expiries(underlying=u)
         if not expiries:
             return []
         if not expiry_code:
             expiry_code = expiries[0]["code"]
 
         exp_code = expiry_code.upper()
-        strikes = self.strikes_by_expiry.get(exp_code, [])
+        strikes = self.strikes_by_expiry.get(u, {}).get(exp_code, [])
         if not strikes:
             return []
 
-        # Find closest ATM strike (rounded to nearest 50)
+        # Find closest ATM strike (rounded to nearest step)
         atm_strike = min(strikes, key=lambda s: abs(s - spot_price))
-        atm_strike = round(atm_strike / 50.0) * 50.0
+        atm_strike = round(atm_strike / step) * step
 
         # Anchor strike (Main strike selected by user or default ATM)
         if main_strike is not None and float(main_strike) > 0:
-            anchor_strike = round(float(main_strike) / 50.0) * 50.0
+            anchor_strike = round(float(main_strike) / step) * step
         else:
             anchor_strike = atm_strike
 
         # Effective hedge distance
-        effective_hedge = float(hedge_distance if hedge_distance is not None and hedge_distance > 0 else spread_width)
-        effective_hedge = max(50.0, round(effective_hedge / 50.0) * 50.0)
+        effective_hedge = float(hedge_distance if hedge_distance is not None and hedge_distance > 0 else (spread_width or default_spread))
+        effective_hedge = max(step, round(effective_hedge / step) * step)
 
         legs_config = []
         strat_type = strategy_type.upper()
 
         if strat_type in ["BULL_CALL_SPREAD", "BULL_CALL"]:
-            # Buy Main Call, Sell Higher OTM Call
-            # Sequence: BUY leg first, then SELL leg
             legs_config = [
-                {"strike": anchor_strike, "option_type": "CE", "action": "BUY"},
-                {"strike": anchor_strike + effective_hedge, "option_type": "CE", "action": "SELL"}
+                {"strike": anchor_strike, "option_type": "CE", "action": "BUY", "lots": 1},
+                {"strike": anchor_strike + effective_hedge, "option_type": "CE", "action": "SELL", "lots": 1}
             ]
         elif strat_type in ["BEAR_PUT_SPREAD", "BEAR_PUT"]:
-            # Buy Main Put, Sell Lower OTM Put
-            # Sequence: BUY leg first, then SELL leg
             legs_config = [
-                {"strike": anchor_strike, "option_type": "PE", "action": "BUY"},
-                {"strike": anchor_strike - effective_hedge, "option_type": "PE", "action": "SELL"}
+                {"strike": anchor_strike, "option_type": "PE", "action": "BUY", "lots": 1},
+                {"strike": anchor_strike - effective_hedge, "option_type": "PE", "action": "SELL", "lots": 1}
             ]
         elif strat_type in ["BULL_PUT_SPREAD", "BULL_PUT_CREDIT"]:
-            # Sell Main Put (Credit), Buy deeper OTM Put hedge
-            # Sequence: BUY hedge leg first, then SELL short leg
             legs_config = [
-                {"strike": anchor_strike - effective_hedge, "option_type": "PE", "action": "BUY"},
-                {"strike": anchor_strike, "option_type": "PE", "action": "SELL"}
+                {"strike": anchor_strike - effective_hedge, "option_type": "PE", "action": "BUY", "lots": 1},
+                {"strike": anchor_strike, "option_type": "PE", "action": "SELL", "lots": 1}
             ]
         elif strat_type in ["BEAR_CALL_SPREAD", "BEAR_CALL_CREDIT"]:
-            # Sell Main Call (Credit), Buy higher OTM Call hedge
-            # Sequence: BUY hedge leg first, then SELL short leg
             legs_config = [
-                {"strike": anchor_strike + effective_hedge, "option_type": "CE", "action": "BUY"},
-                {"strike": anchor_strike, "option_type": "CE", "action": "SELL"}
+                {"strike": anchor_strike + effective_hedge, "option_type": "CE", "action": "BUY", "lots": 1},
+                {"strike": anchor_strike, "option_type": "CE", "action": "SELL", "lots": 1}
             ]
         elif strat_type in ["IRON_CONDOR", "CONDOR"]:
-            # Wings: Buy Far OTM Put, Buy Far OTM Call
-            # Body: Sell OTM Put, Sell OTM Call
-            # Sequence: BOTH BUY legs first, then BOTH SELL legs
-            put_sell = anchor_strike - 100.0
-            put_buy = put_sell - effective_hedge
-            call_sell = anchor_strike + 100.0
-            call_buy = call_sell + effective_hedge
+            wing = effective_hedge
+            put_sell = anchor_strike - step
+            put_buy = put_sell - wing
+            call_sell = anchor_strike + step
+            call_buy = call_sell + wing
 
             legs_config = [
-                {"strike": put_buy, "option_type": "PE", "action": "BUY"},
-                {"strike": call_buy, "option_type": "CE", "action": "BUY"},
-                {"strike": put_sell, "option_type": "PE", "action": "SELL"},
-                {"strike": call_sell, "option_type": "CE", "action": "SELL"}
+                {"strike": put_buy, "option_type": "PE", "action": "BUY", "lots": 1},
+                {"strike": call_buy, "option_type": "CE", "action": "BUY", "lots": 1},
+                {"strike": put_sell, "option_type": "PE", "action": "SELL", "lots": 1},
+                {"strike": call_sell, "option_type": "CE", "action": "SELL", "lots": 1}
             ]
         elif strat_type in ["SHORT_STRADDLE"]:
-            # Sell Main CE, Sell Main PE
             legs_config = [
-                {"strike": anchor_strike, "option_type": "CE", "action": "SELL"},
-                {"strike": anchor_strike, "option_type": "PE", "action": "SELL"}
+                {"strike": anchor_strike, "option_type": "CE", "action": "SELL", "lots": 1},
+                {"strike": anchor_strike, "option_type": "PE", "action": "SELL", "lots": 1}
             ]
         elif strat_type in ["LONG_STRADDLE"]:
-            # Buy Main CE, Buy Main PE
             legs_config = [
-                {"strike": anchor_strike, "option_type": "CE", "action": "BUY"},
-                {"strike": anchor_strike, "option_type": "PE", "action": "BUY"}
+                {"strike": anchor_strike, "option_type": "CE", "action": "BUY", "lots": 1},
+                {"strike": anchor_strike, "option_type": "PE", "action": "BUY", "lots": 1}
             ]
         elif strat_type in ["CALENDAR_SPREAD", "CALENDAR"]:
-            # Sell Near Expiry (current week), Buy Far Expiry (next week) at same strike
             near_exp = exp_code
             far_exp = exp_code
             for i, e in enumerate(expiries):
@@ -513,25 +610,24 @@ class InstrumentMaster:
             if far_exp == near_exp and len(expiries) > 1:
                 far_exp = expiries[1]["code"].upper()
 
-            # BUY far expiry leg first (for margin benefit), SELL near expiry leg
             legs_config = [
-                {"strike": anchor_strike, "option_type": "CE", "action": "BUY", "expiry": far_exp},
-                {"strike": anchor_strike, "option_type": "CE", "action": "SELL", "expiry": near_exp}
+                {"strike": anchor_strike, "option_type": "CE", "action": "BUY", "expiry": far_exp, "lots": 1},
+                {"strike": anchor_strike, "option_type": "CE", "action": "SELL", "expiry": near_exp, "lots": 1}
             ]
         else:
-            # Default to Bull Put Spread
             legs_config = [
-                {"strike": anchor_strike - effective_hedge, "option_type": "PE", "action": "BUY"},
-                {"strike": anchor_strike, "option_type": "PE", "action": "SELL"}
+                {"strike": anchor_strike - effective_hedge, "option_type": "PE", "action": "BUY", "lots": 1},
+                {"strike": anchor_strike, "option_type": "PE", "action": "SELL", "lots": 1}
             ]
 
         resolved_legs = []
         for cfg in legs_config:
             leg_exp = cfg.get("expiry", exp_code)
-            inst = self.resolve_option(cfg["strike"], cfg["option_type"], leg_exp)
-            qty = (inst.lot_size if inst else 65) * lots
+            inst = self.resolve_option(cfg["strike"], cfg["option_type"], leg_exp, underlying=u)
+            leg_lots = int(cfg.get("lots") or 1)
+            lot_size = inst.lot_size if inst else default_lot_size
+            qty = lot_size * leg_lots * lots
             if inst:
-                # Estimate price from live market engine or realistic Black-Scholes Gaussian decay
                 price = 0.0
                 try:
                     from backend.market_engine import market_engine
@@ -541,7 +637,7 @@ class InstrumentMaster:
                     pass
 
                 if price <= 0.0:
-                    price = self.estimate_option_price(spot_price, inst.strike, inst.option_type, inst.expiry_code)
+                    price = self.estimate_option_price(spot_price, inst.strike, inst.option_type, inst.expiry_code, underlying=u)
 
                 resolved_legs.append({
                     "token": inst.token,
@@ -549,17 +645,18 @@ class InstrumentMaster:
                     "strike": inst.strike,
                     "option_type": inst.option_type,
                     "action": cfg["action"],
+                    "lots": leg_lots,
                     "quantity": qty,
                     "price": price,
                     "entry_price": price,
                     "lot_size": inst.lot_size,
                     "expiry": inst.expiry_code,
                     "expiry_date": inst.expiry_date,
-                    "exchange_segment": "nse_fo",
+                    "exchange_segment": inst.exchange_segment,
                     "product": "NRML"
                 })
             else:
-                logger.warning(f"Could not resolve instrument for strike {cfg['strike']} {cfg['option_type']} {exp_code}")
+                logger.warning(f"Could not resolve instrument for strike {cfg['strike']} {cfg['option_type']} {exp_code} ({u})")
 
         return resolved_legs
 
@@ -568,49 +665,57 @@ class InstrumentMaster:
         custom_legs: List[Dict[str, Any]],
         spot_price: float,
         default_expiry: Optional[str] = None,
-        lots: int = 1
+        lots: int = 1,
+        underlying: str = "NIFTY"
     ) -> List[Dict[str, Any]]:
         """
-        Takes user-customized legs (with edited strikes, action, expiry, option_type, quantity),
+        Takes user-customized legs (with edited strikes, action, expiry, option_type, lots, quantity),
         resolves exact scrip master tokens & trading symbols, and estimates/fetches real-time price.
+        Supports both NIFTY (NSE) and SENSEX (BSE).
         """
-        expiries = self.get_sorted_expiries()
+        u = underlying.upper() if underlying else "NIFTY"
+        step = 100.0 if u == "SENSEX" else 50.0
+        default_lot_size = 20 if u == "SENSEX" else 65
+        default_segment = "bse_fo" if u == "SENSEX" else "nse_fo"
+
+        expiries = self.get_sorted_expiries(underlying=u)
         if not default_expiry and expiries:
             default_expiry = expiries[0]["code"]
 
         resolved = []
         for leg in custom_legs:
             try:
-                stk = round(float(leg.get("strike", spot_price)) / 50.0) * 50.0
+                stk = round(float(leg.get("strike", spot_price)) / step) * step
             except Exception:
-                stk = round(spot_price / 50.0) * 50.0
+                stk = round(spot_price / step) * step
 
             opt_type = str(leg.get("option_type", "CE")).upper()
             act = str(leg.get("action", "BUY")).upper()
             act = "SELL" if act.startswith("S") else "BUY"
             leg_exp = str(leg.get("expiry") or default_expiry or "").upper()
 
-            inst = self.resolve_option(stk, opt_type, leg_exp)
-            lot_size = inst.lot_size if inst else 65
-            qty = int(leg.get("quantity") or (lot_size * lots))
+            inst = self.resolve_option(stk, opt_type, leg_exp, underlying=u)
+            lot_size = inst.lot_size if inst else default_lot_size
+            leg_lots = max(1, int(leg.get("lots") or 1))
+            qty = int(leg.get("quantity") or (lot_size * leg_lots * lots))
 
-            price = 0.0
             if inst:
                 trading_symbol = inst.trading_symbol
                 token = inst.token
                 expiry_date = inst.expiry_date
                 expiry_code = inst.expiry_code
+                exchange_segment = inst.exchange_segment
             else:
-                trading_symbol = leg.get("trading_symbol") or f"NIFTY_{leg_exp}_{int(stk)}{opt_type}"
+                trading_symbol = leg.get("trading_symbol") or f"{u}_{leg_exp}_{int(stk)}{opt_type}"
                 token = str(leg.get("token") or "")
                 expiry_date = leg.get("expiry_date") or leg_exp
                 expiry_code = leg_exp
+                exchange_segment = default_segment
 
             if leg.get("is_custom_price") and float(leg.get("price") or 0.0) > 0.0:
                 price = float(leg["price"])
             else:
                 price = 0.0
-                # Price lookup from market engine or realistic curve
                 try:
                     from backend.market_engine import market_engine
                     if market_engine and trading_symbol:
@@ -619,7 +724,7 @@ class InstrumentMaster:
                     pass
 
                 if price <= 0.0:
-                    price = self.estimate_option_price(spot_price, stk, opt_type, expiry_code)
+                    price = self.estimate_option_price(spot_price, stk, opt_type, expiry_code, underlying=u)
 
             resolved.append({
                 "token": token,
@@ -627,6 +732,7 @@ class InstrumentMaster:
                 "strike": stk,
                 "option_type": opt_type,
                 "action": act,
+                "lots": leg_lots,
                 "quantity": qty,
                 "price": price,
                 "entry_price": price,
@@ -634,7 +740,7 @@ class InstrumentMaster:
                 "lot_size": lot_size,
                 "expiry": expiry_code,
                 "expiry_date": expiry_date,
-                "exchange_segment": "nse_fo",
+                "exchange_segment": exchange_segment,
                 "product": "NRML"
             })
         return resolved
@@ -642,7 +748,8 @@ class InstrumentMaster:
     def compute_payoff_profile(
         self,
         legs: List[Dict[str, Any]],
-        spot_price: float
+        spot_price: float,
+        underlying: str = "NIFTY"
     ) -> Dict[str, Any]:
         """
         Sensibull/Opstra style payoff computation:
@@ -660,34 +767,39 @@ class InstrumentMaster:
                 "payoff_curve": []
             }
 
+        u = underlying.upper() if underlying else "NIFTY"
+        step = 50.0 if u == "SENSEX" else 25.0
+        grid_round = 100.0 if u == "SENSEX" else 50.0
+        buffer_pts = 1500.0 if u == "SENSEX" else 600.0
+        base_lot_size = 20 if u == "SENSEX" else 65
+
         strikes = [float(l["strike"]) for l in legs]
-        min_stk = min(strikes) if strikes else spot_price - 500
-        max_stk = max(strikes) if strikes else spot_price + 500
+        min_stk = min(strikes) if strikes else spot_price - buffer_pts
+        max_stk = max(strikes) if strikes else spot_price + buffer_pts
 
         # Calculate net premium
         net_prem = 0.0
         for l in legs:
             act = str(l.get("action", "")).upper()
             prc = float(l.get("price") or l.get("entry_price") or 0.0)
-            qty = abs(int(l.get("quantity") or 65))
+            qty = abs(int(l.get("quantity") or base_lot_size))
             if act.startswith("B"):
                 net_prem -= prc * qty
             else:
                 net_prem += prc * qty
 
         # Evaluation range
-        eval_min = min(min_stk, spot_price) - 600.0
-        eval_max = max(max_stk, spot_price) + 600.0
-        eval_min = round(eval_min / 50.0) * 50.0
-        eval_max = round(eval_max / 50.0) * 50.0
+        eval_min = min(min_stk, spot_price) - buffer_pts
+        eval_max = max(max_stk, spot_price) + buffer_pts
+        eval_min = round(eval_min / grid_round) * grid_round
+        eval_max = round(eval_max / grid_round) * grid_round
 
-        step = 25.0
         num_steps = int((eval_max - eval_min) / step) + 1
         sample_spots = sorted(set([eval_min + i * step for i in range(num_steps)] + strikes + [spot_price]))
 
         # Check for multiple expiries (Calendar Spread modeling)
         leg_expiries = [l.get("expiry") for l in legs if l.get("expiry")]
-        sorted_exp_codes = [e["code"].upper() for e in self.get_sorted_expiries()]
+        sorted_exp_codes = [e["code"].upper() for e in self.get_sorted_expiries(underlying=u)]
         
         nearest_expiry = None
         if leg_expiries:
@@ -707,7 +819,7 @@ class InstrumentMaster:
                 opt = str(leg.get("option_type", "")).upper()
                 act = str(leg.get("action", "")).upper()
                 prc = float(leg.get("price") or leg.get("entry_price") or 0.0)
-                qty = abs(int(leg.get("quantity") or 65))
+                qty = abs(int(leg.get("quantity") or base_lot_size))
                 leg_exp = str(leg.get("expiry") or "").upper()
                 is_far_expiry = bool(has_calendar and leg_exp and leg_exp != nearest_expiry)
 
@@ -717,9 +829,9 @@ class InstrumentMaster:
                     intrinsic = max(0.0, k - s)
 
                 if is_far_expiry:
-                    # In a Calendar Spread at near expiry, far option retains remaining extrinsic time value
                     dist = abs(s - k)
-                    remaining_extrinsic = max(5.0, prc * 0.75 * math.exp(-0.5 * ((dist / 220.0) ** 2)))
+                    decay_width = 700.0 if u == "SENSEX" else 220.0
+                    remaining_extrinsic = max(5.0, prc * 0.75 * math.exp(-0.5 * ((dist / decay_width) ** 2)))
                     opt_val = intrinsic + remaining_extrinsic
                     if act.startswith("B"):
                         leg_pnl = (opt_val - prc) * qty
@@ -737,9 +849,8 @@ class InstrumentMaster:
         for s in sample_spots:
             curve.append({"spot": round(s, 1), "pnl": _pnl_at_spot(s)})
 
-        # Asymptotic checks: test far left and far right
-        pnl_far_left = _pnl_at_spot(max(100.0, eval_min - 3000.0))
-        pnl_far_right = _pnl_at_spot(eval_max + 3000.0)
+        pnl_far_left = _pnl_at_spot(max(100.0, eval_min - 10000.0))
+        pnl_far_right = _pnl_at_spot(eval_max + 10000.0)
 
         all_pnls = [pt["pnl"] for pt in curve]
         raw_max = max(all_pnls)
@@ -767,10 +878,11 @@ class InstrumentMaster:
                 else:
                     breakevens.append(round(p1["spot"], 1))
 
-        # Deduplicate breakevens within 5 points
+        # Deduplicate breakevens within 10 points for Sensex, 5 for Nifty
+        be_tol = 10.0 if u == "SENSEX" else 5.0
         cleaned_be = []
         for be in sorted(breakevens):
-            if not cleaned_be or abs(be - cleaned_be[-1]) > 5.0:
+            if not cleaned_be or abs(be - cleaned_be[-1]) > be_tol:
                 cleaned_be.append(be)
 
         be_low = cleaned_be[0] if len(cleaned_be) > 0 else None
@@ -791,51 +903,43 @@ class InstrumentMaster:
         else:
             risk_reward = "N/A"
 
-        # Margin Required Estimation (NSE SPAN + Exposure with Multi-Leg Strategy Hedge Benefit)
+        # Margin Required Estimation (SPAN + Exposure with Multi-Leg Strategy Hedge Benefit)
         sell_legs = [l for l in legs if str(l.get("action", "")).upper() == "SELL"]
         buy_legs = [l for l in legs if str(l.get("action", "")).upper() == "BUY"]
         total_buy_prem = sum(
-            float(l.get("price", 0)) * int(l.get("quantity", 65))
+            float(l.get("price", 0)) * int(l.get("quantity", base_lot_size))
             for l in buy_legs
         )
         total_sell_prem = sum(
-            float(l.get("price", 0)) * int(l.get("quantity", 65))
+            float(l.get("price", 0)) * int(l.get("quantity", base_lot_size))
             for l in sell_legs
         )
-        total_qty = max([int(l.get("quantity", 65)) for l in legs], default=65)
-        num_lots = max(1, total_qty // 65)
+        total_qty = max([int(l.get("quantity", base_lot_size)) for l in legs], default=base_lot_size)
+        num_lots = max(1, total_qty // base_lot_size)
+        naked_margin = 150000.0 if u == "SENSEX" else 125000.0
+        spread_base = 25000.0 if u == "SENSEX" else 18000.0
+        credit_min = 35000.0 if u == "SENSEX" else 28000.0
+        condor_min = 45000.0 if u == "SENSEX" else 35000.0
 
-        # Multi-leg Strategy Margin Rules:
         if not sell_legs:
-            # 1. Pure long / debit (Buy Call, Buy Put, Long Straddle): only premium required
             margin_required = max(0.0, total_buy_prem)
         elif sell_legs and not buy_legs:
-            # 2. Naked short options: ~₹1,25,000 per lot on Nifty
             mult = 1.35 if len(sell_legs) >= 2 else 1.0
-            margin_required = 125000.0 * num_lots * mult
+            margin_required = naked_margin * num_lots * mult
         else:
-            # 3. Multi-leg hedged strategy (both buy and sell legs present)
-            # Check if this is a Debit Spread (Bull Call Spread, Bear Put Spread):
             is_debit = (total_buy_prem > total_sell_prem)
-            
             if is_debit:
-                # In Debit Spreads, the long option covers the short option completely.
-                # Max initial capital needed to place and hold is the buy premium / net debit
                 margin_required = max(total_buy_prem, abs(max_loss) if max_loss else 0.0)
             else:
-                # Credit Spread / Iron Condor (NSE SPAN with hedge benefit):
-                spread_loss = abs(max_loss) if (max_loss is not None and max_loss < 0) else (18000.0 * num_lots)
+                spread_loss = abs(max_loss) if (max_loss is not None and max_loss < 0) else (spread_base * num_lots)
                 if len(sell_legs) <= len(buy_legs):
                     if len(sell_legs) == 1:
-                        # 2-Leg Credit Spread (Bull Put, Bear Call): Spread Max Loss + SPAN buffer
-                        margin_required = max(spread_loss + (18000.0 * num_lots), 28000.0 * num_lots)
+                        margin_required = max(spread_loss + (spread_base * num_lots), credit_min * num_lots)
                     else:
-                        # 4-Leg Iron Condor / Butterfly:
-                        margin_required = max(spread_loss + (20000.0 * num_lots), 35000.0 * num_lots)
+                        margin_required = max(spread_loss + ((spread_base + 2000.0) * num_lots), condor_min * num_lots)
                 else:
-                    # Partially hedged (Ratio Spread):
                     excess_shorts = len(sell_legs) - len(buy_legs)
-                    margin_required = (28000.0 * num_lots) + (125000.0 * excess_shorts * num_lots)
+                    margin_required = (credit_min * num_lots) + (naked_margin * excess_shorts * num_lots)
 
         return {
             "max_profit": max_profit,
@@ -849,15 +953,15 @@ class InstrumentMaster:
             "payoff_curve": curve
         }
 
-    def generate_strategy_name(self, strategy_type: str, legs: List[Dict[str, Any]]) -> str:
+    def generate_strategy_name(self, strategy_type: str, legs: List[Dict[str, Any]], underlying: str = "NIFTY") -> str:
         """
         Auto-generates clean Sensibull-style strategy names incorporating the exact leg strikes and expiry.
         e.g. Bull Put Spread (25100 PE / 24900 PE) - 27-Oct-2026
-             Bear Call Spread (25200 CE / 25400 CE) - 27-Oct-2026
-             Iron Condor (24800 PE / 25000 PE / 25300 CE / 25500 CE) - 27-Oct-2026
+             SENSEX Iron Condor (79400 PE / 79600 PE / 79800 CE / 80000 CE) - 27-Oct-2026
         """
+        u = underlying.upper() if underlying else "NIFTY"
         if not legs:
-            return "Nifty Strategy"
+            return f"{u} Strategy"
 
         strat_type = strategy_type.upper()
         # Sort legs: PE first then CE; within that by strike
@@ -866,10 +970,11 @@ class InstrumentMaster:
 
         # Extract expiry
         expiry_label = ""
+        exp_dict = self.expiries.get(u, {})
         for l in legs:
             exp_code = l.get("expiry") or l.get("expiry_code")
-            if exp_code and exp_code in self.expiries:
-                expiry_label = self.expiries[exp_code].get("display", exp_code)
+            if exp_code and exp_code in exp_dict:
+                expiry_label = exp_dict[exp_code].get("display", exp_code)
                 break
             elif l.get("expiry_date"):
                 expiry_label = str(l.get("expiry_date"))
@@ -879,6 +984,7 @@ class InstrumentMaster:
                 break
 
         exp_suffix = f" - {expiry_label}" if expiry_label else ""
+        prefix = f"{u} " if u == "SENSEX" else ""
 
         if "BULL_PUT" in strat_type:
             base = f"Bull Put Spread ({legs_desc})"
@@ -896,9 +1002,11 @@ class InstrumentMaster:
             base = f"Short Straddle ({legs_desc})"
         elif "CALENDAR" in strat_type:
             base = f"Calendar Spread ({legs_desc})"
+        elif "CUSTOM" in strat_type:
+            base = f"Custom Strategy ({legs_desc})"
         else:
             title = strategy_type.replace("_", " ").title()
             base = f"{title} ({legs_desc})"
 
-        return f"{base}{exp_suffix}"
+        return f"{prefix}{base}{exp_suffix}"
 
