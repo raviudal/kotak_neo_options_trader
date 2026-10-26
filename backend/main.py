@@ -346,6 +346,8 @@ def kotak_positions(user: dict = Depends(get_current_user)):
 
 class CheckMarginRequest(BaseModel):
     legs: List[Dict[str, Any]]
+    max_loss: Optional[float] = None
+    max_profit: Optional[float] = None
 
 @app.post("/api/kotak/check-margin")
 def kotak_check_margin(req: CheckMarginRequest, user: dict = Depends(get_current_user)):
@@ -353,7 +355,7 @@ def kotak_check_margin(req: CheckMarginRequest, user: dict = Depends(get_current
     manager = KotakNeoManager.get_instance(user["id"])
     if not manager.is_connected:
         return {"is_connected": False, "message": "Kotak Neo login required"}
-    return manager.check_order_margin(req.legs)
+    return manager.check_order_margin(req.legs, max_loss=req.max_loss, max_profit=req.max_profit)
 
 # --- Option Strategies & Stop Loss Endpoints ---
 
@@ -569,7 +571,7 @@ def preview_strategy(req: StrategyPreviewRequest, user: dict = Depends(get_curre
     margin_req = payoff.get("margin_required")
     try:
         if manager.is_connected and legs:
-            margin_res = manager.check_order_margin(legs)
+            margin_res = manager.check_order_margin(legs, max_loss=payoff.get("max_loss"), max_profit=payoff.get("max_profit"))
             if margin_res and margin_res.get("broker_total_margin", 0) > 0:
                 margin_req = margin_res["broker_total_margin"]
     except Exception as e:

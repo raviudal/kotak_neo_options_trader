@@ -57,9 +57,9 @@ export const api = {
   }),
   disconnectKotak: () => apiRequest("/api/kotak/disconnect", { method: "POST" }),
   getKotakLimits: () => apiRequest("/api/kotak/limits"),
-  checkKotakMargin: (legs) => apiRequest("/api/kotak/check-margin", {
+  checkKotakMargin: (legs, max_loss = null, max_profit = null) => apiRequest("/api/kotak/check-margin", {
     method: "POST",
-    body: JSON.stringify({ legs })
+    body: JSON.stringify({ legs, max_loss, max_profit })
   }),
   
   // Strategies & SL

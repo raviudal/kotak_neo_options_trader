@@ -148,7 +148,7 @@ export default function StrategyBuilder({
   // Real-time broker check-margin endpoint query when legs change and Kotak is connected
   useEffect(() => {
     if (kotakStatus?.is_connected && legs && legs.length > 0) {
-      api.checkKotakMargin(legs)
+      api.checkKotakMargin(legs, payoff?.max_loss, payoff?.max_profit)
         .then(res => {
           if (res && res.is_connected) {
             setBrokerMarginData(res);
@@ -159,7 +159,7 @@ export default function StrategyBuilder({
         })
         .catch(err => console.debug("Broker check margin error:", err));
     }
-  }, [legs, kotakStatus?.is_connected]);
+  }, [legs, payoff?.max_loss, payoff?.max_profit, kotakStatus?.is_connected]);
 
   const handleRefreshMaster = async () => {
     setRefreshingMaster(true);
@@ -1029,8 +1029,15 @@ export default function StrategyBuilder({
 
           </div>
 
-          {/* Right: Net Margin & Net Premium Summary (Circled price removed) */}
+          {/* Right: Net Margin & Net Premium Summary with Live Strategy Price */}
           <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs font-mono ml-auto">
+            <div>
+              <span className="text-slate-500 font-sans text-[10px] block">Live Strategy Price</span>
+              <span className={`font-bold ${currentStrategyLTP >= 0 ? 'text-blue-700' : 'text-slate-800'}`}>
+                {currentStrategyLTP >= 0 ? 'Debit ' : 'Credit '}
+                ₹{Math.abs(currentStrategyLTP).toFixed(2)}
+              </span>
+            </div>
             <div>
               <span className="text-slate-500 font-sans text-[10px] block">Margin Req</span>
               <span className="font-bold text-slate-800">
@@ -1069,53 +1076,78 @@ export default function StrategyBuilder({
 
       </div>
 
-      {/* 5. Sensibull Payoff & Margin Metrics Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1.5 sm:gap-2 font-mono">
+      {/* 5. Strategy Metrics Grid: 2 Columns with Label & Value on the SAME line */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-2.5 font-mono text-xs">
         
-        {/* Max Profit */}
-        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
-          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Max Profit</span>
-          <span className="text-xs sm:text-sm font-bold text-emerald-600 block mt-0.5 break-words">
+        {/* Row 1, Col 1: Max Profit */}
+        <div className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[11px] text-slate-500 font-semibold uppercase font-sans">Max Profit</span>
+          <span className="font-bold text-emerald-600 whitespace-nowrap text-xs sm:text-sm">
             {payoff.max_profit !== null ? `+₹${Math.round(payoff.max_profit).toLocaleString('en-IN')}` : 'Unlimited'}
           </span>
         </div>
 
-        {/* Max Loss */}
-        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
-          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Max Loss</span>
-          <span className="text-xs sm:text-sm font-bold text-rose-600 block mt-0.5 break-words">
+        {/* Row 1, Col 2: Max Loss */}
+        <div className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[11px] text-slate-500 font-semibold uppercase font-sans">Max Loss</span>
+          <span className="font-bold text-rose-600 whitespace-nowrap text-xs sm:text-sm">
             {payoff.max_loss !== null ? `-₹${Math.round(Math.abs(payoff.max_loss)).toLocaleString('en-IN')}` : 'Unlimited'}
           </span>
         </div>
 
-        {/* Risk / Reward */}
-        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
-          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Risk / Reward</span>
-          <span className="text-xs sm:text-sm font-bold text-slate-800 block mt-0.5">
+        {/* Row 2, Col 1: Risk / Reward */}
+        <div className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[11px] text-slate-500 font-semibold uppercase font-sans">Risk / Reward</span>
+          <span className="font-bold text-slate-800 whitespace-nowrap text-xs sm:text-sm">
             {payoff.risk_reward}
           </span>
         </div>
 
-        {/* Breakeven(s) */}
-        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
-          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Breakeven(s)</span>
-          <span className="text-[11px] sm:text-xs font-bold text-slate-800 block mt-0.5 leading-tight break-words" title={payoff.breakevens.length > 0 ? payoff.breakevens.map(b => Math.round(b)).join(' & ') : '—'}>
+        {/* Row 2, Col 2: Breakeven(s) */}
+        <div className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[11px] text-slate-500 font-semibold uppercase font-sans">Breakeven(s)</span>
+          <span className="font-bold text-slate-800 whitespace-nowrap text-xs sm:text-sm" title={payoff.breakevens.length > 0 ? payoff.breakevens.map(b => Math.round(b)).join(' & ') : '—'}>
             {payoff.breakevens.length > 0 ? payoff.breakevens.map(b => Math.round(b)).join(' & ') : '—'}
           </span>
         </div>
 
-        {/* Margin Required */}
-        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
-          <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Margin Req</span>
-          <span className="text-xs sm:text-sm font-bold text-slate-800 block mt-0.5 break-words">
+        {/* Row 3, Col 1: Live Strategy Price */}
+        <div className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[11px] text-slate-500 font-semibold uppercase font-sans flex items-center gap-1">
+            <span>Live Strategy Price</span>
+            <span className="text-[9px] px-1 py-0.2 rounded bg-blue-100 text-blue-700 font-bold uppercase font-mono">LTP</span>
+          </span>
+          <span className={`font-bold whitespace-nowrap text-xs sm:text-sm ${
+            currentStrategyLTP >= 0 ? 'text-blue-700' : 'text-slate-800'
+          }`}>
+            {currentStrategyLTP >= 0 ? 'Debit ' : 'Credit '}
+            ₹{Math.abs(currentStrategyLTP).toFixed(2)}
+          </span>
+        </div>
+
+        {/* Row 3, Col 2: Net Premium */}
+        <div className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[11px] text-slate-500 font-semibold uppercase font-sans">Net Premium</span>
+          <span className={`font-bold whitespace-nowrap text-xs sm:text-sm ${
+            payoff.net_premium >= 0 ? 'text-emerald-600' : 'text-slate-800'
+          }`}>
+            {payoff.net_premium >= 0 ? 'Receive ' : 'Pay '}
+            ₹{Math.abs(Math.round(payoff.net_premium)).toLocaleString('en-IN')}
+          </span>
+        </div>
+
+        {/* Row 4, Col 1: Margin Required */}
+        <div className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-[11px] text-slate-500 font-semibold uppercase font-sans">Margin Required</span>
+          <span className="font-bold text-slate-800 whitespace-nowrap text-xs sm:text-sm">
             ₹{Math.round(marginRequired).toLocaleString('en-IN')}
           </span>
         </div>
 
-        {/* Available Margin */}
-        <div className="p-2 bg-slate-50 border border-slate-200 rounded-lg">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] text-slate-500 font-semibold uppercase block font-sans">Avail Margin</span>
+        {/* Row 4, Col 2: Available Margin */}
+        <div className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-slate-500 font-semibold uppercase font-sans">Available Margin</span>
             {availableMargin !== null && (
               <button
                 type="button"
@@ -1124,19 +1156,19 @@ export default function StrategyBuilder({
                 title="Refresh Kotak available margin"
                 className="text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
               >
-                <RefreshCw className={`w-2.5 h-2.5 ${limitsLoading ? 'animate-spin text-blue-600' : ''}`} />
+                <RefreshCw className={`w-3 h-3 ${limitsLoading ? 'animate-spin text-blue-600' : ''}`} />
               </button>
             )}
           </div>
           {availableMargin !== null ? (
-            <div className="mt-0.5 flex flex-wrap items-baseline gap-1">
-              <span className={`text-xs sm:text-sm font-bold break-words leading-tight ${
+            <div className="flex items-center gap-1.5">
+              <span className={`font-bold whitespace-nowrap text-xs sm:text-sm ${
                 availableMargin < marginRequired ? 'text-rose-600 font-extrabold' : 'text-emerald-600'
               }`}>
                 ₹{Math.round(availableMargin).toLocaleString('en-IN')}
               </span>
               {availableMargin < marginRequired && (
-                <span className="text-[9px] px-1 py-0.2 rounded bg-rose-100 text-rose-700 font-bold uppercase font-sans tracking-tight">
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-bold uppercase font-sans tracking-tight">
                   Low
                 </span>
               )}
@@ -1145,10 +1177,10 @@ export default function StrategyBuilder({
             <button
               type="button"
               onClick={onOpenKotakModal}
-              className="mt-1 w-full py-1 px-1 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded text-[10px] font-bold text-blue-700 transition-all flex items-center justify-center gap-1 cursor-pointer"
+              className="py-0.5 px-2 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded text-[10px] font-bold text-blue-700 transition-all cursor-pointer"
               title="Click to connect Kotak Neo"
             >
-              <span>Connect Kotak</span>
+              Connect Kotak
             </button>
           )}
         </div>

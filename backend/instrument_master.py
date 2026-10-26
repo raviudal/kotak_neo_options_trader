@@ -791,21 +791,51 @@ class InstrumentMaster:
         else:
             risk_reward = "N/A"
 
-        # Margin Required Estimation (NSE SPAN + Exposure approximation)
+        # Margin Required Estimation (NSE SPAN + Exposure with Multi-Leg Strategy Hedge Benefit)
         sell_legs = [l for l in legs if str(l.get("action", "")).upper() == "SELL"]
         buy_legs = [l for l in legs if str(l.get("action", "")).upper() == "BUY"]
         total_buy_prem = sum(
             float(l.get("price", 0)) * int(l.get("quantity", 65))
             for l in buy_legs
         )
+        total_sell_prem = sum(
+            float(l.get("price", 0)) * int(l.get("quantity", 65))
+            for l in sell_legs
+        )
         total_qty = max([int(l.get("quantity", 65)) for l in legs], default=65)
         num_lots = max(1, total_qty // 65)
 
-        # Full Margin Required Calculation (Full broker margin from API / exchange without SPAN discount)
-        short_margin = sum(125000.0 * (int(l.get("quantity", 65)) / 65.0) for l in sell_legs)
-        margin_required = short_margin + total_buy_prem
-        if margin_required <= 0:
-            margin_required = total_buy_prem if total_buy_prem > 0 else 50000.0 * num_lots
+        # Multi-leg Strategy Margin Rules:
+        if not sell_legs:
+            # 1. Pure long / debit (Buy Call, Buy Put, Long Straddle): only premium required
+            margin_required = max(0.0, total_buy_prem)
+        elif sell_legs and not buy_legs:
+            # 2. Naked short options: ~₹1,25,000 per lot on Nifty
+            mult = 1.35 if len(sell_legs) >= 2 else 1.0
+            margin_required = 125000.0 * num_lots * mult
+        else:
+            # 3. Multi-leg hedged strategy (both buy and sell legs present)
+            # Check if this is a Debit Spread (Bull Call Spread, Bear Put Spread):
+            is_debit = (total_buy_prem > total_sell_prem)
+            
+            if is_debit:
+                # In Debit Spreads, the long option covers the short option completely.
+                # Max initial capital needed to place and hold is the buy premium / net debit
+                margin_required = max(total_buy_prem, abs(max_loss) if max_loss else 0.0)
+            else:
+                # Credit Spread / Iron Condor (NSE SPAN with hedge benefit):
+                spread_loss = abs(max_loss) if (max_loss is not None and max_loss < 0) else (18000.0 * num_lots)
+                if len(sell_legs) <= len(buy_legs):
+                    if len(sell_legs) == 1:
+                        # 2-Leg Credit Spread (Bull Put, Bear Call): Spread Max Loss + SPAN buffer
+                        margin_required = max(spread_loss + (18000.0 * num_lots), 28000.0 * num_lots)
+                    else:
+                        # 4-Leg Iron Condor / Butterfly:
+                        margin_required = max(spread_loss + (20000.0 * num_lots), 35000.0 * num_lots)
+                else:
+                    # Partially hedged (Ratio Spread):
+                    excess_shorts = len(sell_legs) - len(buy_legs)
+                    margin_required = (28000.0 * num_lots) + (125000.0 * excess_shorts * num_lots)
 
         return {
             "max_profit": max_profit,

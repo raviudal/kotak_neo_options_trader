@@ -482,16 +482,18 @@ class KotakNeoManager:
             logger.error(f"Error fetching limits: {e}")
             return {"error": str(e), "is_connected": False}
 
-    def check_order_margin(self, legs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def check_order_margin(self, legs: List[Dict[str, Any]], max_loss: Optional[float] = None, max_profit: Optional[float] = None) -> Dict[str, Any]:
         """
         Directly queries Kotak Neo /quick/user/check-margin endpoint for strategy legs.
-        Fetches full broker RMS required margin and available margin.
+        Fetches live broker RMS data, available margin, and computes multi-leg strategy margin.
         """
         if not self.is_connected or not self.trade_token:
             return {"error": "Kotak Neo API is not connected", "is_connected": False}
 
         results = []
-        total_broker_margin = 0.0
+        buy_prem = 0.0
+        sell_margin = 0.0
+        sell_prem = 0.0
         broker_avail_margin = None
         broker_avail_cash = None
 
@@ -531,12 +533,16 @@ class KotakNeoManager:
 
                     req_mrgn = float(data.get("reqdMrgn") or data.get("ordMrgn") or 0.0)
                     if req_mrgn <= 0.0:
-                        # Full naked margin fallback if broker returns 0
                         if action == "S":
                             req_mrgn = 125000.0 * (int(qty) / 65.0)
                         else:
                             req_mrgn = float(price) * int(qty)
-                    total_broker_margin += req_mrgn
+
+                    if action == "B":
+                        buy_prem += req_mrgn
+                    else:
+                        sell_margin += req_mrgn
+                        sell_prem += float(price) * int(qty)
 
                     avl_m = float(data.get("avlMrgn") or 0.0)
                     if avl_m > 0:
@@ -553,23 +559,57 @@ class KotakNeoManager:
                         "raw": data
                     })
                 else:
-                    # Fallback to full margin if broker API returned non-200
                     if action == "S":
                         fb = 125000.0 * (int(qty) / 65.0)
+                        sell_margin += fb
+                        sell_prem += float(price) * int(qty)
                     else:
                         fb = float(price) * int(qty)
-                    total_broker_margin += fb
+                        buy_prem += fb
             except Exception as e:
                 logger.warning(f"Error checking margin on Kotak for leg {leg}: {e}")
                 if action == "S":
                     fb = 125000.0 * (int(qty) / 65.0)
+                    sell_margin += fb
+                    sell_prem += float(price) * int(qty)
                 else:
                     fb = float(price) * int(qty)
-                total_broker_margin += fb
+                    buy_prem += fb
+
+        sell_count = sum(1 for l in legs if str(l.get("action", "")).upper() == "SELL")
+        buy_count = sum(1 for l in legs if str(l.get("action", "")).upper() == "BUY")
+        total_qty = max([int(l.get("quantity", 65)) for l in legs], default=65)
+        num_lots = max(1, total_qty // 65)
+
+        # Multi-leg Strategy Margin Rules:
+        if sell_count == 0:
+            # Pure Long Option(s)
+            total_strategy_margin = buy_prem
+        elif buy_count == 0:
+            # Naked Short Option(s)
+            total_strategy_margin = sell_margin
+        else:
+            # Multi-Leg Strategy with both Buy and Sell legs
+            is_debit = (buy_prem > sell_prem)
+            if is_debit:
+                # Debit Spread (Bull Call, Bear Put): Buy premium / net debit required
+                total_strategy_margin = max(buy_prem, abs(max_loss) if max_loss else 0.0)
+            else:
+                # Credit Spread / Iron Condor: Spread Max Loss + SPAN Buffer
+                spread_loss = abs(max_loss) if (max_loss is not None and max_loss < 0) else (18000.0 * num_lots)
+                if sell_count <= buy_count:
+                    if sell_count == 1:
+                        total_strategy_margin = max(spread_loss + (18000.0 * num_lots), 28000.0 * num_lots)
+                    else:
+                        total_strategy_margin = max(spread_loss + (20000.0 * num_lots), 35000.0 * num_lots)
+                else:
+                    excess_shorts = sell_count - buy_count
+                    per_short_mrgn = sell_margin / sell_count if sell_count > 0 else (125000.0 * num_lots)
+                    total_strategy_margin = (28000.0 * num_lots) + (per_short_mrgn * excess_shorts)
 
         return {
             "is_connected": True,
-            "broker_total_margin": round(total_broker_margin, 2),
+            "broker_total_margin": round(total_strategy_margin, 2),
             "broker_available_margin": broker_avail_margin,
             "broker_available_cash": broker_avail_cash,
             "leg_details": results

@@ -1,12 +1,63 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Activity, ShieldAlert, CheckCircle2, AlertOctagon, XCircle, ArrowUpRight, ArrowDownRight, Clock, ChevronDown, ChevronUp, RefreshCw, Edit2, Check, X, Trash2, AlertTriangle, ArrowRight } from 'lucide-react';
 import { api } from '../services/api';
 
 export default function ActivePositions({ liveStrategies, historicalStrategies, ltpCache = {}, onRefresh }) {
   const [activeTab, setActiveTab] = useState('ACTIVE'); // 'ACTIVE' or 'HISTORY'
+  const [historyFilter, setHistoryFilter] = useState('TODAY'); // 'TODAY' or 'ALL'
   const [closingId, setClosingId] = useState(null);
   const [syncingId, setSyncingId] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
+
+  // Present date string in local format (YYYY-MM-DD)
+  const todayStr = useMemo(() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }, []);
+
+  // Filter historical strategies for today
+  const todayHistoryStrategies = useMemo(() => {
+    if (!Array.isArray(historicalStrategies)) return [];
+    return historicalStrategies.filter(strat => {
+      const c1 = strat.closed_at || '';
+      const c2 = strat.created_at || '';
+      return c1.startsWith(todayStr) || c2.startsWith(todayStr);
+    });
+  }, [historicalStrategies, todayStr]);
+
+  // Displayed historical strategies based on filter
+  const displayedHistoricalStrategies = useMemo(() => {
+    if (historyFilter === 'ALL') return historicalStrategies || [];
+    return todayHistoryStrategies;
+  }, [historyFilter, historicalStrategies, todayHistoryStrategies]);
+
+  // Total Realized PnL for Today's closed strategies
+  const totalTodayRealizedPnL = useMemo(() => {
+    return todayHistoryStrategies.reduce((sum, strat) => {
+      const pnl = strat.realized_pnl !== undefined && strat.realized_pnl !== null && strat.realized_pnl !== 0
+        ? strat.realized_pnl
+        : (() => {
+            if (!Array.isArray(strat.legs) || strat.legs.length === 0) return 0;
+            let legSum = 0;
+            let hasAny = false;
+            for (const l of strat.legs) {
+              const en = parseFloat(l.entry_price) || 0;
+              const ex = parseFloat(l.exit_price) || 0;
+              const q = l.quantity || 65;
+              const isBuy = String(l.action || '').toUpperCase().startsWith('B');
+              if (ex > 0 && en > 0) {
+                legSum += isBuy ? (ex - en) * q : (en - ex) * q;
+                hasAny = true;
+              }
+            }
+            return hasAny ? legSum : (strat.realized_pnl || 0);
+          })();
+      return sum + Number(pnl || 0);
+    }, 0);
+  }, [todayHistoryStrategies]);
 
   // Helper to compute live leg price and PnL using real-time WebSocket ticks
   const getLegLiveInfo = (leg) => {
@@ -242,7 +293,7 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              History ({historicalStrategies?.length || 0})
+              History ({todayHistoryStrategies?.length || 0})
             </button>
           </div>
 
@@ -253,6 +304,17 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                 totalActivePnL >= 0 ? 'text-emerald-600' : 'text-rose-600'
               }`}>
                 {totalActivePnL >= 0 ? '+' : ''}₹{totalActivePnL.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+            </div>
+          )}
+
+          {activeTab === 'HISTORY' && (
+            <div className="px-3 py-1 bg-slate-50 border border-slate-200 rounded-lg text-right shadow-sm">
+              <span className="text-[10px] text-slate-500 font-medium uppercase block font-sans">Today's Realized P&L</span>
+              <span className={`text-sm font-bold font-mono ${
+                totalTodayRealizedPnL >= 0 ? 'text-emerald-600' : 'text-rose-600'
+              }`}>
+                {totalTodayRealizedPnL >= 0 ? '+' : ''}₹{totalTodayRealizedPnL.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </span>
             </div>
           )}
@@ -724,13 +786,52 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
 
       {/* --- HISTORICAL STRATEGIES LIST --- */}
       {activeTab === 'HISTORY' && (
-        <div className="space-y-4">
-          {!historicalStrategies || historicalStrategies.length === 0 ? (
+        <div className="space-y-3.5">
+          {/* History Header Filter & Total PnL Banner */}
+          <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+            <div className="flex items-center gap-1.5 font-sans">
+              <span className="text-slate-500 font-semibold text-[11px] mr-1">View:</span>
+              <button
+                type="button"
+                onClick={() => setHistoryFilter('TODAY')}
+                className={`px-2.5 py-1 rounded-lg font-bold text-xs transition-all cursor-pointer ${
+                  historyFilter === 'TODAY'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                Today ({todayHistoryStrategies.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setHistoryFilter('ALL')}
+                className={`px-2.5 py-1 rounded-lg font-bold text-xs transition-all cursor-pointer ${
+                  historyFilter === 'ALL'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                All History ({historicalStrategies?.length || 0})
+              </button>
+            </div>
+            <div className="flex items-center gap-2 font-mono text-xs">
+              <span className="text-slate-500 font-sans text-[11px]">Today's Total Realized P&L:</span>
+              <strong className={`font-bold ${
+                totalTodayRealizedPnL >= 0 ? 'text-emerald-600' : 'text-rose-600'
+              }`}>
+                {totalTodayRealizedPnL >= 0 ? '+' : ''}₹{totalTodayRealizedPnL.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </strong>
+            </div>
+          </div>
+
+          {!displayedHistoricalStrategies || displayedHistoricalStrategies.length === 0 ? (
             <div className="py-12 text-center text-slate-400 font-medium text-xs bg-slate-50 border border-dashed border-slate-200 rounded-xl">
-              No closed or triggered strategies yet. Past strategies with entry, exit, and P&L will appear here.
+              {historyFilter === 'TODAY'
+                ? "No closed or triggered strategies today yet. Closed strategies from today will appear here."
+                : "No closed or triggered strategies yet. Past strategies with entry, exit, and P&L will appear here."}
             </div>
           ) : (
-            historicalStrategies.map((strat) => {
+            displayedHistoricalStrategies.map((strat) => {
               const stratPnL = strat.realized_pnl !== undefined && strat.realized_pnl !== null && strat.realized_pnl !== 0
                 ? strat.realized_pnl
                 : (() => {
@@ -752,6 +853,34 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
 
               const isProfit = stratPnL > 0;
               const isLoss = stratPnL < 0;
+
+              // Combined Strategy Entry Price (per unit)
+              const stratEntryPrice = (() => {
+                if (!Array.isArray(strat.legs) || strat.legs.length === 0) return null;
+                let net = 0;
+                for (const l of strat.legs) {
+                  const p = parseFloat(l.entry_price) || 0;
+                  const isBuy = String(l.action || '').toUpperCase().startsWith('B');
+                  net += (isBuy ? 1 : -1) * p;
+                }
+                return Math.round(net * 100) / 100;
+              })();
+
+              // Combined Strategy Exit Price (per unit)
+              const stratExitPrice = (() => {
+                if (!Array.isArray(strat.legs) || strat.legs.length === 0) return null;
+                let net = 0;
+                let hasExit = false;
+                for (const l of strat.legs) {
+                  const p = parseFloat(l.exit_price) || 0;
+                  const isBuy = String(l.action || '').toUpperCase().startsWith('B');
+                  if (p > 0) {
+                    net += (isBuy ? 1 : -1) * p;
+                    hasExit = true;
+                  }
+                }
+                return hasExit ? Math.round(net * 100) / 100 : null;
+              })();
 
               // Format date times
               const entryTime = strat.created_at ? strat.created_at.replace('T', ' ').split('.')[0] : '—';
@@ -795,9 +924,15 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                           </span>
                         )}
                       </div>
-                      <div className="text-[11px] text-slate-500 font-medium flex items-center gap-3 flex-wrap">
+                      <div className="text-[11px] text-slate-500 font-medium flex items-center gap-2.5 flex-wrap">
                         <span>Type: <strong className="text-slate-700">{strat.strategy_type}</strong></span>
                         <span>Entry Spot: <strong className="font-mono text-slate-800">₹{strat.entry_index_price}</strong></span>
+                        <span className="bg-blue-50/90 border border-blue-200/90 px-2 py-0.5 rounded text-blue-900 font-mono text-[10px] sm:text-[11px]">
+                          Strategy Entry: <strong>{stratEntryPrice !== null ? `₹${stratEntryPrice.toFixed(2)}` : '—'}</strong>
+                        </span>
+                        <span className="bg-indigo-50/90 border border-indigo-200/90 px-2 py-0.5 rounded text-indigo-900 font-mono text-[10px] sm:text-[11px]">
+                          Strategy Exit: <strong>{stratExitPrice !== null ? `₹${stratExitPrice.toFixed(2)}` : '—'}</strong>
+                        </span>
                         <span>Stop Loss: <strong className="font-mono text-rose-600">{strat.index_sl_condition === 'LESS_THAN_OR_EQUAL' ? '≤' : '≥'} ₹{strat.index_sl_price}</strong></span>
                         <span>Net Premium: <strong className="font-mono text-slate-800">₹{strat.net_premium}</strong></span>
                       </div>
@@ -848,7 +983,7 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                     )}
                   </div>
 
-                  {/* Legs Table with Entry, Exit, PnL & Order IDs */}
+                  {/* Legs Table with Entry, Exit & Leg PnL (Order IDs column removed) */}
                   {Array.isArray(strat.legs) && strat.legs.length > 0 && (
                     <div className="overflow-x-auto border border-slate-200 rounded-lg">
                       <table className="w-full text-left text-xs font-mono">
@@ -860,7 +995,6 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                             <th className="py-1.5 px-2 text-right">Entry Price</th>
                             <th className="py-1.5 px-2 text-right">Exit Price</th>
                             <th className="py-1.5 px-2 text-right">Leg P&L</th>
-                            <th className="py-1.5 px-2 text-center">Order IDs</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 bg-white">
@@ -902,20 +1036,6 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                                   ) : (
                                     <span className="text-slate-400">—</span>
                                   )}
-                                </td>
-                                <td className="py-1.5 px-2 text-center text-[10px]">
-                                  <div className="flex items-center justify-center gap-1.5">
-                                    {leg.order_id && (
-                                      <span className="px-1 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200" title="Entry Order ID">
-                                        E: {leg.order_id.slice(-6)}
-                                      </span>
-                                    )}
-                                    {leg.exit_order_id && (
-                                      <span className="px-1 py-0.5 rounded bg-rose-50 text-rose-600 border border-rose-200" title="Exit Order ID">
-                                        X: {leg.exit_order_id.slice(-6)}
-                                      </span>
-                                    )}
-                                  </div>
                                 </td>
                               </tr>
                             );
