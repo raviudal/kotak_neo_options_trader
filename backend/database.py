@@ -146,6 +146,7 @@ def init_db():
             "ALTER TABLE strategy_legs ADD COLUMN executed_at TIMESTAMP;",
             "ALTER TABLE strategy_legs ADD COLUMN exit_order_id TEXT;",
             "ALTER TABLE strategy_legs ADD COLUMN exit_executed_at TIMESTAMP;",
+            "ALTER TABLE strategy_legs ADD COLUMN exchange_segment TEXT DEFAULT 'nse_fo';",
             "ALTER TABLE strategies ADD COLUMN order_status TEXT DEFAULT 'PENDING';",
             "ALTER TABLE strategies ADD COLUMN max_profit REAL;",
             "ALTER TABLE strategies ADD COLUMN max_loss REAL;",
@@ -243,6 +244,10 @@ def init_db():
                       SELECT 1 FROM strategy_legs sl WHERE sl.strategy_id = strategies.id AND sl.exit_price IS NOT NULL
                   );
             """)
+
+            # Ensure BSE segment is accurately reflected on all SENSEX legs and strategies
+            cursor.execute("UPDATE strategy_legs SET exchange_segment = 'bse_fo' WHERE UPPER(trading_symbol) LIKE '%SENSEX%';")
+            cursor.execute("UPDATE strategies SET index_symbol = 'SENSEX' WHERE UPPER(name) LIKE '%SENSEX%';")
         except Exception:
             pass
         

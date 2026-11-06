@@ -433,7 +433,7 @@ def get_strategy_book(user: dict = Depends(get_current_user)):
             cursor.execute("""
                 SELECT id, instrument_token, trading_symbol, strike, option_type, action,
                        quantity, entry_price, exit_price, order_id, status,
-                       execution_status, execution_message, executed_at, exit_order_id, exit_executed_at
+                       execution_status, execution_message, executed_at, exit_order_id, exit_executed_at, exchange_segment
                 FROM strategy_legs
                 WHERE strategy_id = ?
                 ORDER BY id ASC
@@ -748,23 +748,24 @@ def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current
     strat_sl_val = req.strategy_sl_value if req.strategy_sl_value is not None else req.index_sl_price
 
     # 1. Save strategy into database
+    index_label = "SENSEX" if is_sensex else "NIFTY 50"
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO strategies 
-            (user_id, name, strategy_type, index_sl_price, index_sl_condition, index_target_price, entry_index_price, net_premium,
+            (user_id, name, strategy_type, index_symbol, index_sl_price, index_sl_condition, index_target_price, entry_index_price, net_premium,
              max_profit, max_loss, breakeven_low, breakeven_high, risk_reward, hedge_distance,
              index_sl_mode, candle_interval, sl_target_type, strategy_sl_value)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            user["id"], strat_name, req.strategy_type, req.index_sl_price, 
+            user["id"], strat_name, req.strategy_type, index_label, req.index_sl_price, 
             req.index_sl_condition, req.index_target_price, current_spot, round(net_premium, 2),
             final_max_profit, final_max_loss, final_be_low, final_be_high, final_rr, final_hedge,
             effective_sl_mode, effective_candle_interval, sl_target, strat_sl_val
         ))
         strat_id = cursor.lastrowid
 
-        # 2. Save individual legs with real token and symbol
+        # 2. Save individual legs with real token, symbol, and exchange segment
         default_ot = (req.order_type or "MKT").strip().upper()
         if default_ot in ["M", "MARKET", "MKT"]:
             default_ot = "MKT"
@@ -772,13 +773,14 @@ def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current
             default_ot = "L"
 
         for item in resolved_legs_info:
+            leg_seg = item.get("exchange_segment") or default_exchange_seg
             cursor.execute("""
                 INSERT INTO strategy_legs 
-                (strategy_id, instrument_token, trading_symbol, strike, option_type, action, quantity, entry_price)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (strategy_id, instrument_token, trading_symbol, strike, option_type, action, quantity, entry_price, exchange_segment)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 strat_id, item["token"], item["symbol"],
-                item["strike"], item["option_type"], item["action"], item["quantity"], item["entry_price"]
+                item["strike"], item["option_type"], item["action"], item["quantity"], item["entry_price"], leg_seg
             ))
             leg_id = cursor.lastrowid
 
@@ -801,7 +803,7 @@ def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current
                 "quantity": item["quantity"],
                 "price": exec_price,
                 "order_type": leg_ot,
-                "exchange_segment": item.get("exchange_segment") or default_exchange_seg,
+                "exchange_segment": leg_seg,
                 "product": "NRML"
             })
         conn.commit()
@@ -948,17 +950,22 @@ def emergency_close_strategy(strategy_id: int, user: dict = Depends(get_current_
             raise HTTPException(status_code=400, detail="Strategy is not active")
 
         cursor.execute("SELECT * FROM strategy_legs WHERE strategy_id = ?", (strategy_id,))
-        legs = cursor.fetchall()
+        legs = [dict(leg) for leg in cursor.fetchall()]
 
     # Square off by reversing actions (BUY legs become SELL, SELL legs become BUY)
     # Manual square off MUST execute as MARKET (MKT) orders for guaranteed immediate fill
     exit_legs = []
     for leg in legs:
-        exit_action = "BUY" if leg["action"].upper().startswith("S") else "SELL"
+        exit_action = "BUY" if str(leg["action"]).upper().startswith("S") else "SELL"
         token_val = str(leg["instrument_token"] or "").strip()
+        sym = leg.get("trading_symbol") or ""
+        seg = leg.get("exchange_segment")
+        if not seg or (str(seg).lower() == "nse_fo" and "SENSEX" in sym.upper()):
+            seg = "bse_fo" if "SENSEX" in sym.upper() else "nse_fo"
+
         exit_legs.append({
             "leg_id": leg["id"],
-            "trading_symbol": leg["trading_symbol"],
+            "trading_symbol": sym,
             "token": token_val,
             "action": exit_action,
             "quantity": leg["quantity"],
@@ -966,7 +973,7 @@ def emergency_close_strategy(strategy_id: int, user: dict = Depends(get_current_
             "entry_price": leg["entry_price"] or 0.0,
             "order_type": "MKT",
             "product": "NRML",
-            "exchange_segment": "nse_fo"
+            "exchange_segment": seg
         })
 
     # Execute square-off with BUY (cover shorts) first
@@ -980,32 +987,39 @@ def emergency_close_strategy(strategy_id: int, user: dict = Depends(get_current_
     total_realized_pnl = 0.0
     with get_db() as conn:
         cursor = conn.cursor()
-        for leg in legs:
-            token_val = str(leg["instrument_token"] or "").strip()
-            cur_p = market_engine.get_option_price(leg["trading_symbol"], leg["strike"], leg["option_type"], token_val)
-            en_p = float(leg["entry_price"] or 0.0)
-            qty = abs(int(leg["quantity"] or 0))
-            is_buy = str(leg["action"] or "").upper().startswith("B")
-            if cur_p > 0 and en_p > 0:
-                total_realized_pnl += ((cur_p - en_p) * qty if is_buy else (en_p - cur_p) * qty)
-            cursor.execute("""
-                UPDATE strategy_legs 
-                SET exit_price = ?, status = 'CLOSED' 
-                WHERE id = ?
-            """, (cur_p, leg["id"]))
+        if any_success:
+            for leg in legs:
+                token_val = str(leg["instrument_token"] or "").strip()
+                cur_p = market_engine.get_option_price(leg["trading_symbol"], leg["strike"], leg["option_type"], token_val)
+                en_p = float(leg["entry_price"] or 0.0)
+                qty = abs(int(leg["quantity"] or 0))
+                is_buy = str(leg["action"] or "").upper().startswith("B")
+                if cur_p > 0 and en_p > 0:
+                    total_realized_pnl += ((cur_p - en_p) * qty if is_buy else (en_p - cur_p) * qty)
+                cursor.execute("""
+                    UPDATE strategy_legs 
+                    SET exit_price = ?, status = 'CLOSED' 
+                    WHERE id = ?
+                """, (cur_p, leg["id"]))
 
-        if all_success:
+            if all_success:
+                cursor.execute("""
+                    UPDATE strategies 
+                    SET status = 'CLOSED', closed_at = ?, close_reason = 'Manual Square-Off', realized_pnl = ?, order_status = 'EXIT_PLACED' 
+                    WHERE id = ?
+                """, (now_iso, round(total_realized_pnl, 2), strategy_id))
+            else:
+                cursor.execute("""
+                    UPDATE strategies 
+                    SET close_reason = 'Partial Square-Off', realized_pnl = ?, order_status = 'PARTIAL_EXIT' 
+                    WHERE id = ?
+                """, (round(total_realized_pnl, 2), strategy_id))
+        else:
             cursor.execute("""
                 UPDATE strategies 
-                SET status = 'CLOSED', closed_at = ?, close_reason = 'Manual Square-Off', realized_pnl = ? 
+                SET order_status = 'EXIT_REJECTED' 
                 WHERE id = ?
-            """, (now_iso, round(total_realized_pnl, 2), strategy_id))
-        elif any_success:
-            cursor.execute("""
-                UPDATE strategies 
-                SET close_reason = 'Partial Square-Off', realized_pnl = ? 
-                WHERE id = ?
-            """, (round(total_realized_pnl, 2), strategy_id))
+            """, (strategy_id,))
         conn.commit()
 
     try:

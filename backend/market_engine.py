@@ -78,7 +78,7 @@ class MarketEngine:
                         "symbol": sym,
                         "strike": leg.get("strike", 0),
                         "option_type": leg.get("option_type", ""),
-                        "exchange_segment": leg.get("exchange_segment") or "nse_fo"
+                        "exchange_segment": leg.get("exchange_segment") or ("bse_fo" if "SENSEX" in sym.upper() else "nse_fo")
                     })
 
         # 2. Legs from preview StrategyBuilder watchlists
@@ -94,7 +94,7 @@ class MarketEngine:
                         "symbol": sym,
                         "strike": leg.get("strike", 0),
                         "option_type": leg.get("option_type", ""),
-                        "exchange_segment": leg.get("exchange_segment") or "nse_fo"
+                        "exchange_segment": leg.get("exchange_segment") or ("bse_fo" if "SENSEX" in sym.upper() else "nse_fo")
                     })
 
         return all_legs
@@ -110,7 +110,7 @@ class MarketEngine:
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT s.id, s.user_id, s.name, s.strategy_type, s.index_sl_price, 
+                SELECT s.id, s.user_id, s.name, s.strategy_type, s.index_symbol, s.index_sl_price, 
                        s.index_sl_condition, s.index_target_price, s.entry_index_price,
                        s.total_lots, s.net_premium,
                        s.max_profit, s.max_loss, s.breakeven_low, s.breakeven_high, s.risk_reward, s.hedge_distance,
@@ -125,7 +125,7 @@ class MarketEngine:
             for strat in strategies:
                 strat_dict = dict(strat)
                 cursor.execute("""
-                    SELECT id, instrument_token, trading_symbol, strike, option_type, action, quantity, entry_price
+                    SELECT id, instrument_token, trading_symbol, strike, option_type, action, quantity, entry_price, exchange_segment
                     FROM strategy_legs
                     WHERE strategy_id = ? AND status = 'OPEN'
                 """, (strat["id"],))
@@ -216,7 +216,7 @@ class MarketEngine:
         next_close = market_open + timedelta(seconds=(candles_passed + 1) * interval_secs)
         return next_close
 
-    def _update_candle_state(self, spot_price: float):
+    def _update_candle_state(self, spot_price: Optional[float] = None):
         """Update candle state for all CANDLE-mode strategies and evaluate SL on candle close."""
         now = datetime.now()
         for strat_id, strat in list(self.active_strategies.items()):
@@ -226,7 +226,15 @@ class MarketEngine:
             if not is_candle:
                 continue
 
-            current_price = self.calculate_strategy_ltp(strat) if sl_target == "STRATEGY_LTP" else spot_price
+            if sl_target == "STRATEGY_LTP":
+                current_price = self.calculate_strategy_ltp(strat)
+            else:
+                idx_sym = str(strat.get("index_symbol") or "").upper()
+                is_strat_sensex = ("SENSEX" in idx_sym) or ("SENSEX" in str(strat.get("name", "")).upper())
+                current_price = self.sensex_spot if is_strat_sensex else self.nifty_spot
+            
+            if current_price <= 0:
+                continue
             
             state = self.candle_state.get(strat_id)
             if not state:
@@ -295,6 +303,18 @@ class MarketEngine:
                                 self.sensex_change = round(self.sensex_spot - self.sensex_prev_close, 2)
                                 self.sensex_pct_change = round((self.sensex_change / self.sensex_prev_close) * 100, 2)
 
+                            # Update candle state for CANDLE-mode strategies
+                            self._update_candle_state()
+
+                            # Evaluate Index-Based Stop Loss immediately on live tick!
+                            if self.loop and self.loop.is_running():
+                                asyncio.run_coroutine_threadsafe(self.evaluate_index_stop_loss(), self.loop)
+                            else:
+                                try:
+                                    asyncio.run(self.evaluate_index_stop_loss())
+                                except Exception as err:
+                                    logger.error(f"Error evaluating SL in fallback: {err}")
+
                 # 2. Nifty 50 Index Spot tick (token '26000' or segment 'nse_cm' index)
                 elif token == "26000" or "nifty 50" in symbol.lower() or pkt.get("isIndex"):
                     if raw_ltp is not None:
@@ -316,7 +336,7 @@ class MarketEngine:
                                 self.nifty_pct_change = round((self.nifty_change / self.nifty_prev_close) * 100, 2)
 
                             # Update candle state for CANDLE-mode strategies
-                            self._update_candle_state(self.nifty_spot)
+                            self._update_candle_state()
 
                             # Evaluate Index-Based Stop Loss immediately on live tick!
                             if self.loop and self.loop.is_running():
@@ -532,17 +552,21 @@ class MarketEngine:
                     is_breached = True
 
             else:
-                # Nifty Index Spot SL
+                # Index Spot SL (Nifty or Sensex)
                 strat_sl_mode = strat.get("index_sl_mode", "LIVE")
                 if candle_close and strat_sl_mode != "CANDLE":
                     continue
                 if not candle_close and strat_sl_mode == "CANDLE":
                     continue
 
-                if self.nifty_spot <= 0 and price is None:
+                idx_sym = str(strat.get("index_symbol") or "").upper()
+                is_strat_sensex = ("SENSEX" in idx_sym) or ("SENSEX" in str(strat.get("name", "")).upper())
+                active_idx_spot = self.sensex_spot if is_strat_sensex else self.nifty_spot
+
+                if active_idx_spot <= 0 and price is None:
                     continue
 
-                eval_p = price if (target_strat_id == strat_id and price is not None) else self.nifty_spot
+                eval_p = price if (target_strat_id == strat_id and price is not None) else active_idx_spot
                 sl_threshold = strat["index_sl_price"]
 
                 if cond == "LESS_THAN_OR_EQUAL" and eval_p <= sl_threshold:
@@ -569,11 +593,16 @@ class MarketEngine:
             # CRITICAL: Stop Loss exit MUST execute as MARKET (MKT) orders for guaranteed immediate fill
             exit_legs = []
             for leg in strat.get("legs", []):
-                exit_action = "BUY" if leg["action"].upper().startswith("S") else "SELL"
+                exit_action = "BUY" if str(leg["action"]).upper().startswith("S") else "SELL"
                 token_val = str(leg.get("instrument_token") or leg.get("token") or "").strip()
+                sym = leg.get("trading_symbol") or ""
+                seg = leg.get("exchange_segment")
+                if not seg or (str(seg).lower() == "nse_fo" and "SENSEX" in sym.upper()):
+                    seg = "bse_fo" if "SENSEX" in sym.upper() else "nse_fo"
+
                 exit_legs.append({
                     "leg_id": leg.get("id"),
-                    "trading_symbol": leg["trading_symbol"],
+                    "trading_symbol": sym,
                     "token": token_val,
                     "action": exit_action,
                     "quantity": leg["quantity"],
@@ -581,7 +610,7 @@ class MarketEngine:
                     "entry_price": leg.get("entry_price") or 0.0,
                     "order_type": "MKT",
                     "product": "NRML",
-                    "exchange_segment": "nse_fo"
+                    "exchange_segment": seg
                 })
 
             # Fire real exit orders on Kotak Neo API
@@ -590,6 +619,9 @@ class MarketEngine:
             except Exception as e:
                 logger.error(f"Failed to execute stop loss exit on Kotak Neo: {e}")
                 exec_results = [{"status": "error", "message": str(e)}]
+
+            any_success = any(r.get("status") == "success" for r in exec_results) if exec_results else False
+            all_success = all(r.get("status") == "success" for r in exec_results) if exec_results else False
 
             # Update database with exit prices and realized PnL
             now_iso = datetime.now().isoformat()
@@ -601,25 +633,32 @@ class MarketEngine:
             total_realized_pnl = 0.0
             with get_db() as conn:
                 cursor = conn.cursor()
-                for leg in strat.get("legs", []):
-                    token_val = str(leg.get("instrument_token") or leg.get("token") or "").strip()
-                    cur_p = self.get_option_price(leg.get("trading_symbol", ""), leg["strike"], leg["option_type"], token_val)
-                    en_p = float(leg.get("entry_price") or 0.0)
-                    qty = abs(int(leg.get("quantity") or 0))
-                    is_buy = str(leg.get("action") or "").upper().startswith("B")
-                    if cur_p > 0 and en_p > 0:
-                        total_realized_pnl += ((cur_p - en_p) * qty if is_buy else (en_p - cur_p) * qty)
-                    cursor.execute("""
-                        UPDATE strategy_legs 
-                        SET exit_price = ?, status = 'CLOSED' 
-                        WHERE id = ?
-                    """, (cur_p, leg.get("id")))
+                if any_success:
+                    for leg in strat.get("legs", []):
+                        token_val = str(leg.get("instrument_token") or leg.get("token") or "").strip()
+                        cur_p = self.get_option_price(leg.get("trading_symbol", ""), leg["strike"], leg["option_type"], token_val)
+                        en_p = float(leg.get("entry_price") or 0.0)
+                        qty = abs(int(leg.get("quantity") or 0))
+                        is_buy = str(leg.get("action") or "").upper().startswith("B")
+                        if cur_p > 0 and en_p > 0:
+                            total_realized_pnl += ((cur_p - en_p) * qty if is_buy else (en_p - cur_p) * qty)
+                        cursor.execute("""
+                            UPDATE strategy_legs 
+                            SET exit_price = ?, status = 'CLOSED' 
+                            WHERE id = ?
+                        """, (cur_p, leg.get("id")))
 
-                cursor.execute("""
-                    UPDATE strategies 
-                    SET status = 'TRIGGERED_SL', closed_at = ?, close_reason = ?, realized_pnl = ?
-                    WHERE id = ?
-                """, (now_iso, close_reason, round(total_realized_pnl, 2), strat_id))
+                    cursor.execute("""
+                        UPDATE strategies 
+                        SET status = 'TRIGGERED_SL', closed_at = ?, close_reason = ?, realized_pnl = ?, order_status = ?
+                        WHERE id = ?
+                    """, (now_iso, close_reason, round(total_realized_pnl, 2), "EXIT_PLACED" if all_success else "PARTIAL_EXIT", strat_id))
+                else:
+                    cursor.execute("""
+                        UPDATE strategies 
+                        SET order_status = 'EXIT_REJECTED'
+                        WHERE id = ?
+                    """, (strat_id,))
                 conn.commit()
 
             try:
@@ -685,7 +724,7 @@ class MarketEngine:
                             self.is_live = True
                             self.last_tick_time = time.time()
                             await self.evaluate_index_stop_loss()
-                            self._update_candle_state(self.nifty_spot)
+                            self._update_candle_state()
 
                         sensex_q = await asyncio.to_thread(manager.get_sensex_quote)
                         if sensex_q and sensex_q.get("spot", 0) > 0:
@@ -697,6 +736,8 @@ class MarketEngine:
                             self.sensex_low = sensex_q["low"]
                             self.sensex_prev_close = sensex_q["prev_close"]
                             self.is_live = True
+                            await self.evaluate_index_stop_loss()
+                            self._update_candle_state()
 
                         # 2. Fetch live quotes for all legs (active strategies + strategy builder preview)
                         watched_legs = self.get_all_watched_legs()
@@ -706,7 +747,7 @@ class MarketEngine:
                                 def _fetch_single(leg):
                                     sym = leg.get("symbol") or ""
                                     tok = str(leg.get("token") or "")
-                                    seg = leg.get("exchange_segment") or "nse_fo"
+                                    seg = leg.get("exchange_segment") or ("bse_fo" if "SENSEX" in sym.upper() else "nse_fo")
                                     try:
                                         ltp = manager.get_instrument_ltp(seg, tok, sym)
                                         if ltp > 0:

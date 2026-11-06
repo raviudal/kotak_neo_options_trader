@@ -1087,7 +1087,9 @@ class KotakNeoManager:
             exchange_segment = "nse_cm"
             product = leg.get("product") or "CNC"
         else:
-            exchange_segment = leg.get("exchange_segment", "nse_fo")
+            exchange_segment = leg.get("exchange_segment")
+            if not exchange_segment or (str(exchange_segment).lower() == "nse_fo" and "SENSEX" in symbol.upper()):
+                exchange_segment = "bse_fo" if "SENSEX" in symbol.upper() else "nse_fo"
             product = leg.get("product", "NRML")
 
         # Auto-resolve token and trading symbol for options if missing but strike/type given
