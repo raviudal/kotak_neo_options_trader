@@ -4,7 +4,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, status, Query
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, status, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -724,11 +724,12 @@ def place_single_order(req: SingleOrderRequest, user: dict = Depends(get_current
 
 @app.post("/api/orders/test-itc")
 def test_itc_order(user: dict = Depends(get_current_user)):
-    """Places a live test order for 1 share of ITC (ITC-EQ, token 1660, nse_cm, CNC) on Kotak Neo"""
+    """Places a live test order for 1 share of ITC (ITC-EQ, token 1660, nse_cm, CNC) on Kotak Neo and measures latency"""
     manager = KotakNeoManager.get_instance(user["id"])
     if not manager.is_connected:
         raise HTTPException(status_code=403, detail="Kotak Neo login required")
 
+    t0 = time.time()
     res = manager.place_order_leg({
         "trading_symbol": "ITC-EQ",
         "token": "1660",
@@ -737,15 +738,18 @@ def test_itc_order(user: dict = Depends(get_current_user)):
         "exchange_segment": "nse_cm",
         "product": "CNC",
         "order_type": "L",
-        "price": 0.0,
+        "price": 400.0,
         "tag": "TEST_ITC_1"
     })
+    elapsed_ms = int((time.time() - t0) * 1000)
+    res["benchmark_latency_ms"] = elapsed_ms
+    logger.info(f"Test ITC order latency: {elapsed_ms} ms (Broker Result: {res.get('status')})")
     if res.get("status") == "error":
         raise HTTPException(status_code=400, detail=res.get("message", "ITC Test Order Rejected"))
     return res
 
 @app.post("/api/orders/naked")
-def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_user)):
+def place_naked_order(req: NakedOrderRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     """
     Executes a single-leg Naked Option trade (Buy or Sell) on Kotak Neo,
     and immediately places a broker Stop-Loss (SL / SL-M) order directly with the broker.
@@ -862,14 +866,7 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
         raise HTTPException(status_code=400, detail=f"Entry order failed on Kotak: {err}")
 
     entry_order_id = entry_res.get("order_id")
-    fill_price = live_ltp
-    time.sleep(0.3)
-    try:
-        quote = manager.get_instrument_ltp(seg, token, symbol)
-        if quote > 0:
-            fill_price = quote
-    except Exception:
-        pass
+    fill_price = float(req.limit_price or req.price or live_ltp)
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -949,12 +946,8 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
                 """, (strat_id,))
                 conn.commit()
 
-    # 5. Sync executed fill prices and reload strategies into memory
-    try:
-        manager.sync_strategy_fill_prices(strat_id)
-    except Exception as e:
-        logger.debug(f"Sync fill prices for strategy #{strat_id}: {e}")
-
+    # 5. Offload fill price syncing to background task to respond instantly
+    background_tasks.add_task(manager.sync_strategy_fill_prices, strat_id)
     market_engine.reload_active_strategies()
 
     msg = f"Naked {action_norm} order #{entry_order_id} placed successfully!"
@@ -979,7 +972,7 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
     }
 
 @app.post("/api/strategies")
-def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current_user)):
+def create_strategy(req: StrategyCreateRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     manager = KotakNeoManager.get_instance(user["id"])
     if not manager.is_connected:
         raise HTTPException(status_code=403, detail="Cannot place orders: Kotak Neo is not logged in.")
@@ -1141,14 +1134,9 @@ def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current
     any_success = any(r.get("status") == "success" for r in exec_results) if exec_results else False
     order_status_summary = "ALL_PLACED" if all_success else ("PARTIAL_PLACED" if any_success else "ALL_REJECTED")
 
-    # 4. If orders were placed, immediately sync executed fill prices from Kotak Neo API
+    # 4. If orders were placed, immediately sync executed fill prices from Kotak Neo API in background
     if any_success:
-        try:
-            time.sleep(0.3)
-            sync_res = manager.sync_strategy_fill_prices(strat_id)
-            logger.info(f"Strategy #{strat_id} fill prices sync result: {sync_res}")
-        except Exception as e:
-            logger.warning(f"Could not immediately sync fill prices for strategy #{strat_id}: {e}")
+        background_tasks.add_task(manager.sync_strategy_fill_prices, strat_id)
 
     # 5. Reload active strategies into memory for sub-millisecond live tick monitoring
     market_engine.reload_active_strategies()

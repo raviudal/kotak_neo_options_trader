@@ -38,6 +38,12 @@ class KotakNeoManager:
         self.is_connected: bool = False
         self.session_created_at: Optional[datetime] = None
 
+        # Persistent HTTP connection pooling for ultra-low latency order routing
+        self.http_session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=25, pool_maxsize=50, max_retries=1)
+        self.http_session.mount("https://", adapter)
+        self.http_session.mount("http://", adapter)
+
         self.load_config()
 
     @classmethod
@@ -119,7 +125,7 @@ class KotakNeoManager:
         # Ping Kotak Neo positions endpoint to actively verify token authenticity
         try:
             url = f"{self.base_url}quick/user/positions"
-            r = requests.get(url, headers=self.get_auth_headers(), timeout=3.0)
+            r = self.http_session.get(url, headers=self.get_auth_headers(), timeout=3.0)
             if r.status_code == 200:
                 self.is_connected = True
                 return True
@@ -237,7 +243,7 @@ class KotakNeoManager:
                 "totp": final_totp
             }
             logger.info("Calling Kotak Neo Step 1 (tradeApiLogin)...")
-            r1 = requests.post(login_url, json=step1_payload, headers=step1_headers, timeout=12)
+            r1 = self.http_session.post(login_url, json=step1_payload, headers=step1_headers, timeout=12)
             try:
                 res1 = r1.json()
             except Exception:
@@ -268,7 +274,7 @@ class KotakNeoManager:
             }
             step2_payload = {"mpin": self.mpin}
             logger.info("Calling Kotak Neo Step 2 (tradeApiValidate)...")
-            r2 = requests.post(validate_url, json=step2_payload, headers=step2_headers, timeout=12)
+            r2 = self.http_session.post(validate_url, json=step2_payload, headers=step2_headers, timeout=12)
             try:
                 res2 = r2.json()
             except Exception:
@@ -351,7 +357,7 @@ class KotakNeoManager:
             return None
         try:
             url = f"{self.base_url}script-details/1.0/quotes/neosymbol/nse_cm%7CNifty%2050"
-            r = requests.get(url, headers=self.get_auth_headers(is_quote=True), timeout=4)
+            r = self.http_session.get(url, headers=self.get_auth_headers(is_quote=True), timeout=4)
             if r.status_code == 200:
                 data = r.json()
                 if isinstance(data, list) and len(data) > 0:
@@ -379,7 +385,7 @@ class KotakNeoManager:
             return None
         try:
             url = f"{self.base_url}script-details/1.0/quotes/neosymbol/bse_cm%7CSENSEX"
-            r = requests.get(url, headers=self.get_auth_headers(is_quote=True), timeout=4)
+            r = self.http_session.get(url, headers=self.get_auth_headers(is_quote=True), timeout=4)
             if r.status_code == 200:
                 data = r.json()
                 if isinstance(data, list) and len(data) > 0:
@@ -418,7 +424,7 @@ class KotakNeoManager:
                     "trnsTp": "B"
                 })
             }
-            r = requests.post(url, headers=self.get_auth_headers(), data=payload, timeout=4)
+            r = self.http_session.post(url, headers=self.get_auth_headers(), data=payload, timeout=4)
             if r.status_code == 200:
                 resp = r.json()
                 d = resp.get("data") if isinstance(resp, dict) else resp
@@ -445,7 +451,7 @@ class KotakNeoManager:
         try:
             url = f"{self.base_url}quick/user/limits?sId={self.trade_sid}"
             data = {"jData": json.dumps({"seg": "ALL", "exch": "ALL", "prod": "ALL"})}
-            r = requests.post(url, headers=self.get_auth_headers(), data=data, timeout=8)
+            r = self.http_session.post(url, headers=self.get_auth_headers(), data=data, timeout=8)
             logger.info(f"Kotak limits raw HTTP {r.status_code}: {r.text[:500]}")
             if r.status_code == 200:
                 raw = r.json()
@@ -553,7 +559,7 @@ class KotakNeoManager:
                     })
                 }
 
-                r = requests.post(url, headers=self.get_auth_headers(), data=payload, timeout=6)
+                r = self.http_session.post(url, headers=self.get_auth_headers(), data=payload, timeout=6)
                 if r.status_code == 200:
                     resp_json = r.json()
                     data = resp_json.get("data") if isinstance(resp_json, dict) else {}
@@ -652,7 +658,7 @@ class KotakNeoManager:
             return []
         try:
             url = f"{self.base_url}quick/user/positions"
-            r = requests.get(url, headers=self.get_auth_headers(), timeout=8)
+            r = self.http_session.get(url, headers=self.get_auth_headers(), timeout=8)
             if r.status_code == 200:
                 res = r.json()
                 return res.get("data", [])
@@ -680,7 +686,7 @@ class KotakNeoManager:
             for endpoint in [f"script-details/1.0/quotes/neosymbol/{neo_symbol}", f"script-details/1.0/quotes/neosymbol/{neo_symbol}/ltp"]:
                 try:
                     url = f"{self.base_url}{endpoint}"
-                    r = requests.get(url, headers=self.get_auth_headers(is_quote=True), timeout=3.5)
+                    r = self.http_session.get(url, headers=self.get_auth_headers(is_quote=True), timeout=3.5)
                     if r.status_code == 200:
                         data = r.json()
                         ltp_val = None
@@ -712,7 +718,7 @@ class KotakNeoManager:
             f"{self.base_url}quick/user/orders"
         ]:
             try:
-                r = requests.get(url, headers=self.get_auth_headers(), timeout=6)
+                r = self.http_session.get(url, headers=self.get_auth_headers(), timeout=6)
                 if r.status_code == 200:
                     res = r.json()
                     data = res.get("data") if isinstance(res, dict) else res
@@ -731,7 +737,7 @@ class KotakNeoManager:
             f"{self.base_url}quick/user/trades"
         ]:
             try:
-                r = requests.get(url, headers=self.get_auth_headers(), timeout=6)
+                r = self.http_session.get(url, headers=self.get_auth_headers(), timeout=6)
                 if r.status_code == 200:
                     res = r.json()
                     data = res.get("data") if isinstance(res, dict) else res
@@ -750,7 +756,7 @@ class KotakNeoManager:
             f"{self.base_url}quick/order/history?nOrdNo={order_id}"
         ]:
             try:
-                r = requests.get(url, headers=self.get_auth_headers(), timeout=6)
+                r = self.http_session.get(url, headers=self.get_auth_headers(), timeout=6)
                 if r.status_code == 200:
                     res = r.json()
                     data = res.get("data") if isinstance(res, dict) else res
@@ -1145,18 +1151,8 @@ class KotakNeoManager:
             form_payload = {"jData": json.dumps(inner)}
             url = f"{self.base_url}quick/order/rule/ms/place?sId={self.trade_sid}"
 
-            proxies = None
-            import socket
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.settimeout(0.2)
-                    if sock.connect_ex(("127.0.0.1", 1080)) == 0:
-                        proxies = {"http": "socks5://127.0.0.1:1080", "https": "socks5://127.0.0.1:1080"}
-            except Exception:
-                pass
-
             t0 = time.time()
-            resp = requests.post(url, headers=self.get_auth_headers(), data=form_payload, timeout=12, proxies=proxies)
+            resp = self.http_session.post(url, headers=self.get_auth_headers(), data=form_payload, timeout=8)
             lat_ms = int((time.time() - t0) * 1000)
             return inner, form_payload, resp, lat_ms
 
@@ -1282,7 +1278,7 @@ class KotakNeoManager:
             f"{self.base_url}order/1.0/orders/cancel"
         ]:
             try:
-                r = requests.post(url, headers=headers, data=form_payload, timeout=8)
+                r = self.http_session.post(url, headers=headers, data=form_payload, timeout=8)
                 if r.status_code in [200, 201]:
                     res = r.json()
                     stat = str(res.get("stat") or res.get("stCode") or "").lower()

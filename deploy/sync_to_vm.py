@@ -38,9 +38,10 @@ def make_tarball(output_filename="deploy_archive.tar.gz"):
 def sync_to_gcp():
     tar_path = make_tarball()
     
-    gcp_key = os.getenv("GCP_SSH_KEY", os.path.expanduser("~/.ssh/id_rsa"))
-    gcp_user = os.getenv("GCP_VM_USER", "ubuntu")
-    gcp_ip = os.getenv("GCP_VM_IP", "YOUR_VM_IP")
+    default_key = r"D:\kotakneo_api\gcp_key" if os.path.exists(r"D:\kotakneo_api\gcp_key") else os.path.expanduser("~/.ssh/id_rsa")
+    gcp_key = os.getenv("GCP_SSH_KEY", default_key)
+    gcp_user = os.getenv("GCP_VM_USER", "raviudal_udal")
+    gcp_ip = os.getenv("GCP_VM_IP", "34.27.55.202")
     remote_dir = os.getenv("GCP_TARGET_DIR", f"/home/{gcp_user}/neotrader")
 
     print(f"[2/3] Uploading archive to VM ({gcp_user}@{gcp_ip}:{remote_dir}/)...")
