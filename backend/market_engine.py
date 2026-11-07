@@ -221,6 +221,11 @@ class MarketEngine:
         now = datetime.now()
         for strat_id, strat in list(self.active_strategies.items()):
             sl_target = strat.get("sl_target_type") or "INDEX"
+            strat_type = str(strat.get("strategy_type") or "").upper()
+
+            # Skip naked trades and broker-managed SL trades from app-side SL monitoring
+            if strat_type.startswith("NAKED") or sl_target in ["BROKER_SL", "NONE", "BROKER"]:
+                continue
             is_candle = (strat.get("index_sl_mode") == "CANDLE") or (sl_target == "STRATEGY_LTP")
             interval = strat.get("candle_interval") or 5
             if not is_candle:
@@ -409,9 +414,13 @@ class MarketEngine:
                 })
             
             sl_target = s_data.get("sl_target_type") or "INDEX"
+            strat_type = str(s_data.get("strategy_type") or "").upper()
             strategy_ltp = self.calculate_strategy_ltp(s_data)
 
-            if sl_target == "STRATEGY_LTP":
+            if sl_target == "BROKER_SL" or strat_type.startswith("NAKED"):
+                sl_price = s_data.get("strategy_sl_value") or 0.0
+                distance_to_sl = None
+            elif sl_target == "STRATEGY_LTP":
                 sl_price = s_data.get("strategy_sl_value") if s_data.get("strategy_sl_value") is not None else s_data.get("index_sl_price", 0.0)
                 distance_to_sl = 0.0
                 if s_data.get("index_sl_condition") == "GREATER_THAN_OR_EQUAL":
@@ -520,6 +529,11 @@ class MarketEngine:
                 continue
 
             sl_target = strat.get("sl_target_type") or "INDEX"
+            strat_type = str(strat.get("strategy_type") or "").upper()
+
+            # Skip naked trades and broker-managed SL trades from app-side SL monitoring
+            if strat_type.startswith("NAKED") or sl_target in ["BROKER_SL", "NONE", "BROKER"]:
+                continue
 
             # Entry stabilization safeguard: Do not trigger SL within 5 seconds of creation
             created_at_val = strat.get("created_at")

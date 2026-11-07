@@ -800,7 +800,43 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
                 detail=f"For Option SELL, Stop-Loss trigger price (₹{req.sl_trigger_price:.2f}) must be above current LTP (₹{live_ltp:.2f})."
             )
 
-    # 2. Place Entry Order on Kotak Neo API
+    # 2. Create Strategy Record in SQLite FIRST (for SEBI mandated order logging)
+    strat_type = "NAKED_BUY" if is_buy else "NAKED_SELL"
+    strat_name = f"{u} {int(req.strike)} {req.option_type} ({action_norm} {req.lots or 1} Lot)"
+    net_prem = round(live_ltp * quantity * (-1 if is_buy else 1), 2)
+    max_prof = None if is_buy else round(live_ltp * quantity, 2)
+    max_ls = round(abs(live_ltp - req.sl_trigger_price) * quantity, 2) if req.enable_sl else (round(live_ltp * quantity, 2) if is_buy else None)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO strategies
+            (user_id, name, strategy_type, index_symbol, index_sl_price, index_sl_condition,
+             entry_index_price, net_premium, max_profit, max_loss, total_lots,
+             index_sl_mode, candle_interval, sl_target_type, strategy_sl_value, order_status, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user["id"], strat_name, strat_type, u, 0.0,
+            "LESS_THAN_OR_EQUAL" if is_buy else "GREATER_THAN_OR_EQUAL",
+            market_engine.sensex_spot if is_sensex else market_engine.nifty_spot,
+            net_prem, max_prof, max_ls, req.lots or 1,
+            "LIVE", 0, "BROKER_SL", req.sl_trigger_price, "ROUTING", "ACTIVE"
+        ))
+        strat_id = cursor.lastrowid
+
+        cursor.execute("""
+            INSERT INTO strategy_legs
+            (strategy_id, instrument_token, trading_symbol, strike, option_type, action,
+             quantity, entry_price, exchange_segment, status, execution_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'ROUTING')
+        """, (
+            strat_id, token, symbol, req.strike, req.option_type, action_norm,
+            quantity, live_ltp, seg
+        ))
+        leg_id = cursor.lastrowid
+        conn.commit()
+
+    # 3. Place Entry Order on Kotak Neo API (with strategy_id linked for order_logs)
     entry_payload = {
         "trading_symbol": symbol,
         "token": token,
@@ -814,10 +850,15 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
         "exchange_segment": seg
     }
 
-    logger.info(f"Placing Naked {action_norm} entry order: {symbol} ({quantity} qty @ {req.order_type})...")
-    entry_res = manager.place_order_leg(entry_payload)
+    logger.info(f"Placing Naked {action_norm} entry order for Strategy #{strat_id}: {symbol} ({quantity} qty @ {req.order_type})...")
+    entry_res = manager.place_order_leg(entry_payload, strategy_id=strat_id, is_exit=False)
     if entry_res.get("status") != "success":
         err = entry_res.get("message") or "Entry order rejected by Kotak Neo"
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE strategies SET order_status = 'ALL_REJECTED', status = 'REJECTED' WHERE id = ?", (strat_id,))
+            cursor.execute("UPDATE strategy_legs SET status = 'REJECTED', execution_status = 'FAILED', execution_message = ? WHERE id = ?", (err, leg_id))
+            conn.commit()
         raise HTTPException(status_code=400, detail=f"Entry order failed on Kotak: {err}")
 
     entry_order_id = entry_res.get("order_id")
@@ -830,41 +871,19 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
     except Exception:
         pass
 
-    # 3. Create Strategy Record in SQLite
-    strat_type = "NAKED_BUY" if is_buy else "NAKED_SELL"
-    strat_name = f"{u} {int(req.strike)} {req.option_type} ({action_norm} {req.lots} Lot)"
-    net_prem = round(fill_price * quantity * (-1 if is_buy else 1), 2)
-    max_prof = None if is_buy else round(fill_price * quantity, 2)
-    max_ls = round(abs(fill_price - req.sl_trigger_price) * quantity, 2) if req.enable_sl else (round(fill_price * quantity, 2) if is_buy else None)
-
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO strategies
-            (user_id, name, strategy_type, index_symbol, index_sl_price, index_sl_condition,
-             entry_index_price, net_premium, max_profit, max_loss, total_lots,
-             index_sl_mode, candle_interval, sl_target_type, strategy_sl_value, order_status, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            user["id"], strat_name, strat_type, u, req.sl_trigger_price,
-            "LESS_THAN_OR_EQUAL" if is_buy else "GREATER_THAN_OR_EQUAL",
-            market_engine.sensex_spot if is_sensex else market_engine.nifty_spot,
-            net_prem, max_prof, max_ls, req.lots,
-            "LIVE", 0, "BROKER_SL", req.sl_trigger_price, "ENTRY_PLACED", "ACTIVE"
-        ))
-        strat_id = cursor.lastrowid
-
-        # Insert Leg
+            UPDATE strategy_legs
+            SET order_id = ?, entry_price = ?, status = 'OPEN', execution_status = 'SUCCESS',
+                execution_message = ?
+            WHERE id = ?
+        """, (str(entry_order_id), fill_price, f"Order #{entry_order_id} placed on Kotak Neo", leg_id))
         cursor.execute("""
-            INSERT INTO strategy_legs
-            (strategy_id, instrument_token, trading_symbol, strike, option_type, action,
-             quantity, entry_price, order_id, exchange_segment, status, execution_status, execution_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'SUCCESS', ?)
-        """, (
-            strat_id, token, symbol, req.strike, req.option_type, action_norm,
-            quantity, fill_price, str(entry_order_id), seg, f"Order #{entry_order_id} placed on Kotak Neo"
-        ))
-        leg_id = cursor.lastrowid
+            UPDATE strategies
+            SET order_status = 'ENTRY_PLACED'
+            WHERE id = ?
+        """, (strat_id,))
         conn.commit()
 
     # 4. Immediately Place Broker Stop-Loss Order (if enabled)
@@ -893,7 +912,7 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
             "quantity": quantity,
             "strike": req.strike,
             "option_type": req.option_type,
-            "product": req.product or "NRML",
+            "product": req.product or "MIS",
             "order_type": sl_type,
             "price": limit_p if sl_type == "SL" else 0.0,
             "trigger_price": tp,
@@ -930,7 +949,12 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
                 """, (strat_id,))
                 conn.commit()
 
-    # 5. Reload strategies into memory
+    # 5. Sync executed fill prices and reload strategies into memory
+    try:
+        manager.sync_strategy_fill_prices(strat_id)
+    except Exception as e:
+        logger.debug(f"Sync fill prices for strategy #{strat_id}: {e}")
+
     market_engine.reload_active_strategies()
 
     msg = f"Naked {action_norm} order #{entry_order_id} placed successfully!"
@@ -943,8 +967,10 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
         "status": "success",
         "strategy_id": strat_id,
         "name": strat_name,
-        "entry_order_id": entry_order_id,
-        "sl_order_id": sl_order_id,
+        "order_id": str(entry_order_id),
+        "entry_order_id": str(entry_order_id),
+        "exit_order_id": str(sl_order_id) if sl_order_id else None,
+        "sl_order_id": str(sl_order_id) if sl_order_id else None,
         "sl_status": "PLACED" if sl_order_id else ("FAILED" if req.enable_sl else "DISABLED"),
         "sl_error": sl_err,
         "fill_price": fill_price,

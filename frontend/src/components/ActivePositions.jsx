@@ -345,8 +345,9 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
               }
               const isProfit = pnl >= 0;
               const isStrategyLtpSl = strat.sl_target_type === 'STRATEGY_LTP';
+              const isBrokerSl = strat.sl_target_type === 'BROKER_SL' || String(strat.strategy_type || '').startsWith('NAKED');
               const currentStratLtp = getStrategyLiveLTP(strat);
-              const isCloseToSL = Math.abs(strat.distance_to_sl || 0) < (isStrategyLtpSl ? 10 : 25);
+              const isCloseToSL = !isBrokerSl && Math.abs(strat.distance_to_sl || 0) < (isStrategyLtpSl ? 10 : 25);
 
               return (
                 <div
@@ -452,7 +453,26 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                     </div>
                   </div>
 
-                  {/* Stop-Loss Status Banner & Editable Controls (Supports Nifty Index SL and Strategy LTP Candle Close SL) */}
+                  {/* Stop-Loss Status Banner: Broker SL for Naked trades vs App-side Index/Strategy SL for Hedged strategies */}
+                  {isBrokerSl ? (
+                    <div className="mt-2.5 p-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs flex flex-wrap items-center justify-between gap-2.5 font-mono">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                        <span className="font-sans font-bold text-slate-800">Broker Stop-Loss:</span>
+                        <span className="font-mono font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
+                          {strat.strategy_sl_value ? `Trigger @ ₹${strat.strategy_sl_value}` : 'Active with Broker'}
+                        </span>
+                        {strat.legs?.[0]?.exit_order_id && (
+                          <span className="text-slate-500 font-mono text-[11px]">
+                            (Order #{strat.legs[0].exit_order_id})
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-500 font-sans font-medium">
+                        Directly managed by Kotak Neo RMS • No app tracking
+                      </div>
+                    </div>
+                  ) : (
                   <div className={`mt-2.5 p-2.5 rounded-lg border text-xs flex flex-wrap items-center justify-between gap-2.5 font-mono ${
                     isCloseToSL 
                       ? 'bg-rose-50 border-rose-200 text-rose-900' 
@@ -704,6 +724,7 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                       </div>
                     )}
                   </div>
+                  )}
 
                   {/* Collapsible Legs Table */}
                   {expandedId === strat.id && strat.legs && (

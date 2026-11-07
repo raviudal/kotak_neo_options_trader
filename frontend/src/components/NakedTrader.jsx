@@ -937,9 +937,9 @@ export default function NakedTrader({
             <span>Order Placed Successfully! (Intraday MIS)</span>
           </div>
           <div className="font-mono text-xs text-slate-700">
-            Entry Order ID: <strong className="text-emerald-700">{successResult.order_id}</strong>
-            {successResult.exit_order_id && (
-              <> • Broker SL Order ID: <strong className="text-rose-700">{successResult.exit_order_id}</strong></>
+            Entry Order ID: <strong className="text-emerald-700">#{successResult.order_id || successResult.entry_order_id}</strong>
+            {(successResult.exit_order_id || successResult.sl_order_id) && (
+              <> • Broker SL Order ID: <strong className="text-rose-700">#{successResult.exit_order_id || successResult.sl_order_id}</strong></>
             )}
           </div>
         </div>
