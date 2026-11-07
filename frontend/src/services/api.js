@@ -97,6 +97,7 @@ export const api = {
   getExpiries: (underlying = "NIFTY") => apiRequest(`/api/market/expiries?underlying=${encodeURIComponent(underlying)}`),
   getStrikes: (expiry, underlying = "NIFTY") => apiRequest(`/api/market/strikes?underlying=${encodeURIComponent(underlying)}${expiry ? `&expiry=${encodeURIComponent(expiry)}` : ''}`),
   getOptionChain: (expiry, underlying = "NIFTY") => apiRequest(`/api/market/chain?underlying=${encodeURIComponent(underlying)}${expiry ? `&expiry=${encodeURIComponent(expiry)}` : ''}`),
+  getOptionQuote: (underlying, expiry, strike, option_type) => apiRequest(`/api/market/option-quote?underlying=${encodeURIComponent(underlying)}&strike=${encodeURIComponent(strike)}&option_type=${encodeURIComponent(option_type)}${expiry ? `&expiry=${encodeURIComponent(expiry)}` : ''}`),
   refreshMaster: () => apiRequest("/api/market/refresh-master", { method: "POST" }),
 
   // System & Server Health

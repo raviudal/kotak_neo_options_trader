@@ -167,14 +167,17 @@ class SingleOrderRequest(BaseModel):
 
 class NakedOrderRequest(BaseModel):
     underlying: str = "NIFTY"                # "NIFTY" or "SENSEX"
-    expiry_code: str                        # e.g. "07NOV26"
+    expiry_code: Optional[str] = None       # e.g. "07NOV26"
+    expiry: Optional[str] = None            # alias for expiry_code
     strike: float                           # e.g. 24600.0
     option_type: str                        # "CE" or "PE"
     action: str                             # "BUY" or "SELL"
-    lots: int = 1                           # Number of lots
+    lots: Optional[int] = 1                 # Number of lots
+    quantity: Optional[int] = None          # Optional explicit total quantity
     order_type: Optional[str] = "MKT"       # "MKT" or "L"
     limit_price: Optional[float] = 0.0      # Limit price if entry is "L"
-    product: Optional[str] = "NRML"
+    price: Optional[float] = 0.0            # alias for limit_price
+    product: Optional[str] = "MIS"          # "MIS" (Intraday) or "NRML"
     enable_sl: Optional[bool] = True
     sl_order_type: Optional[str] = "SL"     # "SL" or "SL-M"
     sl_trigger_price: float = 0.0           # Stop loss trigger price
@@ -504,6 +507,74 @@ def get_option_chain(expiry: Optional[str] = Query(None), count: int = Query(10)
     snapshot["is_live"] = market_engine.is_live
     return snapshot
 
+@app.get("/api/market/option-quote")
+def get_single_option_quote(
+    underlying: str = Query("NIFTY"),
+    expiry: Optional[str] = Query(None),
+    strike: float = Query(...),
+    option_type: str = Query(...),
+    user: dict = Depends(get_current_user)
+):
+    """Fetches real-time live LTP and instrument metadata for a specific option contract"""
+    from backend.instrument_master import InstrumentMaster
+    master = InstrumentMaster.get_instance()
+    u = underlying.upper() if underlying else "NIFTY"
+    is_sensex = (u == "SENSEX")
+    seg = "bse_fo" if is_sensex else "nse_fo"
+
+    # 1. Resolve contract
+    inst = master.resolve_option(strike, option_type, expiry, underlying=u)
+    if not inst:
+        raise HTTPException(status_code=404, detail=f"Contract not found for {u} {strike} {option_type}")
+
+    token = inst.token
+    symbol = inst.trading_symbol
+
+    # 2. Check live LTP in market engine cache
+    ltp = market_engine.get_option_price(symbol, strike, option_type, token)
+
+    # If missing or zero, fetch live from Kotak Neo API directly
+    manager = KotakNeoManager.get_instance(user["id"])
+    if ltp <= 0 and manager.is_connected:
+        try:
+            live_quote = manager.get_instrument_ltp(seg, token, symbol)
+            if live_quote > 0:
+                ltp = live_quote
+                market_engine.symbol_ltp_cache[token] = ltp
+                market_engine.symbol_ltp_cache[symbol] = ltp
+        except Exception as e:
+            logger.debug(f"Error fetching live quote for {symbol}: {e}")
+
+    # Fallback to pricing model if market is closed / no trade today
+    spot = market_engine.sensex_spot if is_sensex else market_engine.nifty_spot
+    if spot <= 0:
+        spot = 80000.0 if is_sensex else 24500.0
+    if ltp <= 0:
+        ltp = master.estimate_option_price(spot, strike, option_type, inst.expiry_date, u)
+
+    # Intrinsic / Time value
+    is_ce = option_type.upper() == "CE"
+    intrinsic = max(0.0, round(spot - strike if is_ce else strike - spot, 2))
+    time_value = max(0.0, round(ltp - intrinsic, 2))
+
+    return {
+        "status": "success",
+        "symbol": symbol,
+        "trading_symbol": symbol,
+        "token": token,
+        "strike": inst.strike,
+        "option_type": inst.option_type,
+        "expiry_code": inst.expiry_code,
+        "expiry_date": inst.expiry_date,
+        "exchange_segment": inst.exchange_segment,
+        "lot_size": inst.lot_size,
+        "ltp": round(ltp, 2),
+        "spot": round(spot, 2),
+        "intrinsic": intrinsic,
+        "intrinsic_value": intrinsic,
+        "time_value": time_value
+    }
+
 @app.post("/api/market/refresh-master")
 def refresh_token_master(user: dict = Depends(get_current_user)):
     """Manually force re-download of today's scrip master from Kotak Neo"""
@@ -642,7 +713,7 @@ def place_single_order(req: SingleOrderRequest, user: dict = Depends(get_current
         "quantity": req.quantity,
         "strike": req.strike,
         "option_type": req.option_type,
-        "product": req.product or "NRML",
+        "product": req.product or "MIS",
         "order_type": req.order_type or "MKT",
         "price": req.price or 0.0,
         "exchange_segment": req.exchange_segment or ("nse_cm" if req.product == "CNC" else "nse_fo")
@@ -689,19 +760,19 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
     u = (req.underlying or "NIFTY").upper()
     is_sensex = (u == "SENSEX")
     seg = "bse_fo" if is_sensex else "nse_fo"
-    lot_size = 20 if is_sensex else 65
-    quantity = int(req.lots * lot_size)
-
+    exp = req.expiry_code or req.expiry
     # 1. Resolve Instrument
-    inst = master.resolve_option(req.strike, req.option_type, req.expiry_code, underlying=u)
+    inst = master.resolve_option(req.strike, req.option_type, exp, underlying=u)
     if not inst:
         raise HTTPException(
             status_code=400,
-            detail=f"Could not resolve option contract for {u} {req.strike} {req.option_type} ({req.expiry_code})"
+            detail=f"Could not resolve option contract for {u} {req.strike} {req.option_type} ({exp})"
         )
 
     token = inst.token
     symbol = inst.trading_symbol
+    lot_size = inst.lot_size if (inst and inst.lot_size) else (20 if is_sensex else 65)
+    quantity = req.quantity if (req.quantity and req.quantity > 0) else int((req.lots or 1) * lot_size)
 
     # Live LTP Quote
     live_ltp = market_engine.get_option_price(symbol, req.strike, req.option_type, token)
@@ -737,9 +808,9 @@ def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_u
         "quantity": quantity,
         "strike": req.strike,
         "option_type": req.option_type,
-        "product": req.product or "NRML",
+        "product": req.product or "MIS",
         "order_type": req.order_type or "MKT",
-        "price": float(req.limit_price or 0.0),
+        "price": float(req.limit_price or req.price or 0.0),
         "exchange_segment": seg
     }
 
