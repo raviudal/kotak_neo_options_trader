@@ -165,6 +165,22 @@ class SingleOrderRequest(BaseModel):
     price: Optional[float] = 0.0
     exchange_segment: Optional[str] = "nse_fo"
 
+class NakedOrderRequest(BaseModel):
+    underlying: str = "NIFTY"                # "NIFTY" or "SENSEX"
+    expiry_code: str                        # e.g. "07NOV26"
+    strike: float                           # e.g. 24600.0
+    option_type: str                        # "CE" or "PE"
+    action: str                             # "BUY" or "SELL"
+    lots: int = 1                           # Number of lots
+    order_type: Optional[str] = "MKT"       # "MKT" or "L"
+    limit_price: Optional[float] = 0.0      # Limit price if entry is "L"
+    product: Optional[str] = "NRML"
+    enable_sl: Optional[bool] = True
+    sl_order_type: Optional[str] = "SL"     # "SL" or "SL-M"
+    sl_trigger_price: float = 0.0           # Stop loss trigger price
+    sl_limit_price: Optional[float] = 0.0   # Stop loss limit price
+    tag: Optional[str] = None
+
 # --- Authentication Endpoints ---
 
 @app.get("/api/auth/registration-status")
@@ -657,6 +673,214 @@ def test_itc_order(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail=res.get("message", "ITC Test Order Rejected"))
     return res
 
+@app.post("/api/orders/naked")
+def place_naked_order(req: NakedOrderRequest, user: dict = Depends(get_current_user)):
+    """
+    Executes a single-leg Naked Option trade (Buy or Sell) on Kotak Neo,
+    and immediately places a broker Stop-Loss (SL / SL-M) order directly with the broker.
+    Records the position in active strategies for live PnL and exit tracking.
+    """
+    manager = KotakNeoManager.get_instance(user["id"])
+    if not manager.is_connected:
+        raise HTTPException(status_code=403, detail="Kotak Neo login required to place orders.")
+
+    from backend.instrument_master import InstrumentMaster
+    master = InstrumentMaster.get_instance()
+    u = (req.underlying or "NIFTY").upper()
+    is_sensex = (u == "SENSEX")
+    seg = "bse_fo" if is_sensex else "nse_fo"
+    lot_size = 20 if is_sensex else 65
+    quantity = int(req.lots * lot_size)
+
+    # 1. Resolve Instrument
+    inst = master.resolve_option(req.strike, req.option_type, req.expiry_code, underlying=u)
+    if not inst:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not resolve option contract for {u} {req.strike} {req.option_type} ({req.expiry_code})"
+        )
+
+    token = inst.token
+    symbol = inst.trading_symbol
+
+    # Live LTP Quote
+    live_ltp = market_engine.get_option_price(symbol, req.strike, req.option_type, token)
+    if live_ltp <= 0:
+        live_ltp = master.estimate_option_price(
+            market_engine.sensex_spot if is_sensex else market_engine.nifty_spot,
+            req.strike, req.option_type, inst.expiry_date, u
+        )
+
+    action_norm = "BUY" if str(req.action).upper().startswith("B") else "SELL"
+    is_buy = (action_norm == "BUY")
+
+    # Validate Stop-Loss if enabled
+    if req.enable_sl:
+        if req.sl_trigger_price <= 0:
+            raise HTTPException(status_code=400, detail="Please enter a valid Stop-Loss trigger price greater than 0.")
+        if is_buy and req.sl_trigger_price >= live_ltp:
+            raise HTTPException(
+                status_code=400,
+                detail=f"For Option BUY, Stop-Loss trigger price (₹{req.sl_trigger_price:.2f}) must be below current LTP (₹{live_ltp:.2f})."
+            )
+        if not is_buy and req.sl_trigger_price <= live_ltp:
+            raise HTTPException(
+                status_code=400,
+                detail=f"For Option SELL, Stop-Loss trigger price (₹{req.sl_trigger_price:.2f}) must be above current LTP (₹{live_ltp:.2f})."
+            )
+
+    # 2. Place Entry Order on Kotak Neo API
+    entry_payload = {
+        "trading_symbol": symbol,
+        "token": token,
+        "action": action_norm,
+        "quantity": quantity,
+        "strike": req.strike,
+        "option_type": req.option_type,
+        "product": req.product or "NRML",
+        "order_type": req.order_type or "MKT",
+        "price": float(req.limit_price or 0.0),
+        "exchange_segment": seg
+    }
+
+    logger.info(f"Placing Naked {action_norm} entry order: {symbol} ({quantity} qty @ {req.order_type})...")
+    entry_res = manager.place_order_leg(entry_payload)
+    if entry_res.get("status") != "success":
+        err = entry_res.get("message") or "Entry order rejected by Kotak Neo"
+        raise HTTPException(status_code=400, detail=f"Entry order failed on Kotak: {err}")
+
+    entry_order_id = entry_res.get("order_id")
+    fill_price = live_ltp
+    time.sleep(0.3)
+    try:
+        quote = manager.get_instrument_ltp(seg, token, symbol)
+        if quote > 0:
+            fill_price = quote
+    except Exception:
+        pass
+
+    # 3. Create Strategy Record in SQLite
+    strat_type = "NAKED_BUY" if is_buy else "NAKED_SELL"
+    strat_name = f"{u} {int(req.strike)} {req.option_type} ({action_norm} {req.lots} Lot)"
+    net_prem = round(fill_price * quantity * (-1 if is_buy else 1), 2)
+    max_prof = None if is_buy else round(fill_price * quantity, 2)
+    max_ls = round(abs(fill_price - req.sl_trigger_price) * quantity, 2) if req.enable_sl else (round(fill_price * quantity, 2) if is_buy else None)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO strategies
+            (user_id, name, strategy_type, index_symbol, index_sl_price, index_sl_condition,
+             entry_index_price, net_premium, max_profit, max_loss, total_lots,
+             index_sl_mode, candle_interval, sl_target_type, strategy_sl_value, order_status, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user["id"], strat_name, strat_type, u, req.sl_trigger_price,
+            "LESS_THAN_OR_EQUAL" if is_buy else "GREATER_THAN_OR_EQUAL",
+            market_engine.sensex_spot if is_sensex else market_engine.nifty_spot,
+            net_prem, max_prof, max_ls, req.lots,
+            "LIVE", 0, "BROKER_SL", req.sl_trigger_price, "ENTRY_PLACED", "ACTIVE"
+        ))
+        strat_id = cursor.lastrowid
+
+        # Insert Leg
+        cursor.execute("""
+            INSERT INTO strategy_legs
+            (strategy_id, instrument_token, trading_symbol, strike, option_type, action,
+             quantity, entry_price, order_id, exchange_segment, status, execution_status, execution_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'SUCCESS', ?)
+        """, (
+            strat_id, token, symbol, req.strike, req.option_type, action_norm,
+            quantity, fill_price, str(entry_order_id), seg, f"Order #{entry_order_id} placed on Kotak Neo"
+        ))
+        leg_id = cursor.lastrowid
+        conn.commit()
+
+    # 4. Immediately Place Broker Stop-Loss Order (if enabled)
+    sl_res = None
+    sl_order_id = None
+    sl_err = None
+
+    if req.enable_sl:
+        exit_action = "SELL" if is_buy else "BUY"
+        sl_type = str(req.sl_order_type or "SL").upper()
+        if sl_type not in ["SL", "SL-M"]:
+            sl_type = "SL"
+
+        tp = float(req.sl_trigger_price)
+        limit_p = float(req.sl_limit_price or 0.0)
+        if limit_p <= 0:
+            if exit_action == "SELL":
+                limit_p = max(0.05, round(round((tp * 0.98) / 0.05) * 0.05, 2))
+            else:
+                limit_p = round(round((tp * 1.02) / 0.05) * 0.05, 2)
+
+        sl_payload = {
+            "trading_symbol": symbol,
+            "token": token,
+            "action": exit_action,
+            "quantity": quantity,
+            "strike": req.strike,
+            "option_type": req.option_type,
+            "product": req.product or "NRML",
+            "order_type": sl_type,
+            "price": limit_p if sl_type == "SL" else 0.0,
+            "trigger_price": tp,
+            "exchange_segment": seg
+        }
+
+        logger.info(f"Submitting immediate broker Stop-Loss order for Strategy #{strat_id}: {symbol} ({exit_action} {quantity} @ TP {tp}, Limit {limit_p})...")
+        sl_res = manager.place_order_leg(sl_payload, strategy_id=strat_id, is_exit=True)
+        if sl_res.get("status") == "success":
+            sl_order_id = sl_res.get("order_id")
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE strategy_legs
+                    SET exit_order_id = ?
+                    WHERE id = ?
+                """, (str(sl_order_id), leg_id))
+                cursor.execute("""
+                    UPDATE strategies
+                    SET order_status = 'ALL_PLACED'
+                    WHERE id = ?
+                """, (strat_id,))
+                conn.commit()
+            logger.info(f"✔ Immediate Stop-Loss Order #{sl_order_id} placed on Kotak Neo for Strategy #{strat_id}")
+        else:
+            sl_err = sl_res.get("message") or "Broker rejected SL order"
+            logger.warning(f"Immediate SL order failed on Kotak: {sl_err}")
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE strategies
+                    SET order_status = 'PARTIAL_PLACED'
+                    WHERE id = ?
+                """, (strat_id,))
+                conn.commit()
+
+    # 5. Reload strategies into memory
+    market_engine.reload_active_strategies()
+
+    msg = f"Naked {action_norm} order #{entry_order_id} placed successfully!"
+    if sl_order_id:
+        msg += f" Stop-Loss order #{sl_order_id} is active with broker."
+    elif sl_err:
+        msg += f" (Note: Broker SL placement returned: {sl_err})"
+
+    return {
+        "status": "success",
+        "strategy_id": strat_id,
+        "name": strat_name,
+        "entry_order_id": entry_order_id,
+        "sl_order_id": sl_order_id,
+        "sl_status": "PLACED" if sl_order_id else ("FAILED" if req.enable_sl else "DISABLED"),
+        "sl_error": sl_err,
+        "fill_price": fill_price,
+        "quantity": quantity,
+        "message": msg
+    }
+
 @app.post("/api/strategies")
 def create_strategy(req: StrategyCreateRequest, user: dict = Depends(get_current_user)):
     manager = KotakNeoManager.get_instance(user["id"])
@@ -951,6 +1175,14 @@ def emergency_close_strategy(strategy_id: int, user: dict = Depends(get_current_
 
         cursor.execute("SELECT * FROM strategy_legs WHERE strategy_id = ?", (strategy_id,))
         legs = [dict(leg) for leg in cursor.fetchall()]
+
+    # If any leg has an existing pending broker SL order, cancel it first to prevent double execution
+    for leg in legs:
+        if leg.get("exit_order_id"):
+            try:
+                manager.cancel_order(str(leg["exit_order_id"]))
+            except Exception as ce:
+                logger.warning(f"Could not cancel pending SL order #{leg['exit_order_id']}: {ce}")
 
     # Square off by reversing actions (BUY legs become SELL, SELL legs become BUY)
     # Manual square off MUST execute as MARKET (MKT) orders for guaranteed immediate fill

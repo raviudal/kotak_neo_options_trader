@@ -86,6 +86,10 @@ export const api = {
     method: "POST",
     body: JSON.stringify(payload)
   }),
+  placeNakedOrder: (payload) => apiRequest("/api/orders/naked", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  }),
   testItcOrder: () => apiRequest("/api/orders/test-itc", { method: "POST" }),
   getOrderLogs: (limit = 100) => apiRequest(`/api/orders/logs?limit=${limit}`),
 

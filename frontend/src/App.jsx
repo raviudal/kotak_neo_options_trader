@@ -5,13 +5,14 @@ import Setup2FAModal from './components/Setup2FAModal';
 import KotakModal from './components/KotakModal';
 import NiftyBanner from './components/NiftyBanner';
 import StrategyBuilder from './components/StrategyBuilder';
+import NakedTrader from './components/NakedTrader';
 import ActivePositions from './components/ActivePositions';
 import OptionChain from './components/OptionChain';
 import OrderBookModal from './components/OrderBookModal';
 import ServerInfoModal from './components/ServerInfoModal';
 import { MarketWebSocket } from './services/websocket';
 import { api } from './services/api';
-import { AlertTriangle, Table, Layers, Activity, Lock, BookOpen } from 'lucide-react';
+import { AlertTriangle, Table, Layers, Activity, Lock, BookOpen, Shield, Zap } from 'lucide-react';
 
 export default function App() {
   const [user, setUser] = useState(() => {
@@ -37,6 +38,9 @@ export default function App() {
 
   // Mobile Active Tab: 'DASHBOARD' | 'BUILDER'
   const [mobileTab, setMobileTab] = useState('DASHBOARD');
+
+  // Terminal Mode: 'HEDGED' (Strategy Builder) | 'NAKED' (Single Option with instant SL)
+  const [tradingTab, setTradingTab] = useState('HEDGED');
 
   // Real-time Stop Loss Alert Banner
   const [activeAlert, setActiveAlert] = useState(null);
@@ -226,20 +230,69 @@ export default function App() {
         {/* Desktop 2-Column Layout / Mobile Switcher */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 relative">
           
-          {/* Left Column: Strategy Builder */}
-          <div className={`lg:col-span-5 space-y-5 ${mobileTab === 'POSITIONS' ? 'hidden lg:block' : ''}`}>
-            <StrategyBuilder
-              niftySpot={niftyData?.spot}
-              sensexSpot={sensexData?.spot}
-              ltpCache={ltpCache}
-              wsClient={wsRef.current}
-              kotakStatus={kotakStatus}
-              onOpenKotakModal={() => setShowKotakModal(true)}
-              onStrategyCreated={() => {
-                fetchStrategies();
-                setMobileTab('DASHBOARD');
-              }}
-            />
+          {/* Left Column: Trading Section (Hedged vs Naked Tabs) */}
+          <div className={`lg:col-span-5 space-y-3.5 ${mobileTab === 'POSITIONS' ? 'hidden lg:block' : ''}`}>
+            
+            {/* Top Tab Bar: Hedged (Strategy Builder) vs Naked (Single Option) */}
+            <div className="bg-white border border-slate-200 rounded-xl p-1 shadow-xs flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setTradingTab('HEDGED')}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-extrabold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                  tradingTab === 'HEDGED'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                }`}
+              >
+                <Shield className="w-4 h-4" />
+                <span>Hedged</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setTradingTab('NAKED')}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-extrabold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                  tradingTab === 'NAKED'
+                    ? 'bg-amber-600 text-white shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                }`}
+              >
+                <Zap className="w-4 h-4" />
+                <span>Naked</span>
+              </button>
+            </div>
+
+            {/* Tab 1: Hedged Content (Strategy Builder) */}
+            {tradingTab === 'HEDGED' && (
+              <StrategyBuilder
+                niftySpot={niftyData?.spot}
+                sensexSpot={sensexData?.spot}
+                ltpCache={ltpCache}
+                wsClient={wsRef.current}
+                kotakStatus={kotakStatus}
+                onOpenKotakModal={() => setKotakModalOpen(true)}
+                onStrategyCreated={() => {
+                  fetchStrategies();
+                  setMobileTab('DASHBOARD');
+                }}
+              />
+            )}
+
+            {/* Tab 2: Naked Options Trader */}
+            {tradingTab === 'NAKED' && (
+              <NakedTrader
+                niftySpot={niftyData?.spot}
+                sensexSpot={sensexData?.spot}
+                ltpCache={ltpCache}
+                wsClient={wsRef.current}
+                kotakStatus={kotakStatus}
+                onOpenKotakModal={() => setKotakModalOpen(true)}
+                onOrderPlaced={() => {
+                  fetchStrategies();
+                  setMobileTab('DASHBOARD');
+                }}
+              />
+            )}
           </div>
 
           {/* Right Column: Active Positions & SL Monitor */}

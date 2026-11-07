@@ -1259,6 +1259,37 @@ class KotakNeoManager:
                 "latency_ms": latency_ms
             }
 
+    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        """Cancels a pending order (e.g. pending Stop-Loss order) on Kotak Neo API"""
+        if not self.is_connected or not self.trade_token or not order_id:
+            return {"status": "error", "message": "Cannot cancel: not connected or invalid order ID"}
+
+        clean_oid = str(order_id).strip()
+        inner = {
+            "on": clean_oid,
+            "am": "NO"
+        }
+        form_payload = {"jData": json.dumps(inner)}
+        headers = self.get_auth_headers()
+        
+        for url in [
+            f"{self.base_url}quick/order/cancel?sId={self.trade_sid}",
+            f"{self.base_url}quick/order/cancel",
+            f"{self.base_url}order/1.0/orders/cancel"
+        ]:
+            try:
+                r = requests.post(url, headers=headers, data=form_payload, timeout=8)
+                if r.status_code in [200, 201]:
+                    res = r.json()
+                    stat = str(res.get("stat") or res.get("stCode") or "").lower()
+                    if stat in ["ok", "200", "success"]:
+                        logger.info(f"✔ Successfully canceled Kotak Order #{clean_oid}")
+                        return {"status": "success", "order_id": clean_oid, "response": res}
+            except Exception as e:
+                logger.debug(f"Cancel order attempt on {url} failed: {e}")
+
+        return {"status": "warning", "message": f"Could not cancel order #{clean_oid} (may have already filled or expired)"}
+
     def execute_multi_leg_strategy(
         self,
         legs: List[Dict[str, Any]],
