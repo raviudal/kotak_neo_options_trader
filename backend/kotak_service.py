@@ -666,18 +666,18 @@ class KotakNeoManager:
             return 0.0
         
         targets = []
-        if token:
-            targets.append(f"{exchange_segment}|{token}")
         if symbol:
             targets.append(f"{exchange_segment}|{symbol}")
             clean_sym = symbol.replace("-EQ", "").replace("-BE", "").strip()
             if clean_sym != symbol:
                 targets.append(f"{exchange_segment}|{clean_sym}")
+        if token:
+            targets.append(f"{exchange_segment}|{token}")
 
         import urllib.parse
         for target in targets:
             neo_symbol = urllib.parse.quote(target)
-            for endpoint in [f"script-details/1.0/quotes/neosymbol/{neo_symbol}/ltp", f"script-details/1.0/quotes/neosymbol/{neo_symbol}"]:
+            for endpoint in [f"script-details/1.0/quotes/neosymbol/{neo_symbol}", f"script-details/1.0/quotes/neosymbol/{neo_symbol}/ltp"]:
                 try:
                     url = f"{self.base_url}{endpoint}"
                     r = requests.get(url, headers=self.get_auth_headers(is_quote=True), timeout=3.5)
@@ -686,13 +686,17 @@ class KotakNeoManager:
                         ltp_val = None
                         if isinstance(data, list) and len(data) > 0:
                             first = data[0]
-                            ltp_val = first.get("ltp") or first.get("lastPrice") or first.get("lp") or first.get("close")
+                            ohlc = first.get("ohlc") if isinstance(first.get("ohlc"), dict) else {}
+                            ltp_val = first.get("ltp") or first.get("lastPrice") or first.get("lp") or first.get("close") or ohlc.get("close")
                         elif isinstance(data, dict):
                             data_arr = data.get("data") or data.get("result")
                             if isinstance(data_arr, list) and len(data_arr) > 0:
-                                ltp_val = data_arr[0].get("ltp") or data_arr[0].get("lastPrice")
+                                first = data_arr[0]
+                                ohlc = first.get("ohlc") if isinstance(first.get("ohlc"), dict) else {}
+                                ltp_val = first.get("ltp") or first.get("lastPrice") or first.get("lp") or first.get("close") or ohlc.get("close")
                             else:
-                                ltp_val = data.get("ltp") or data.get("lastPrice")
+                                ohlc = data.get("ohlc") if isinstance(data.get("ohlc"), dict) else {}
+                                ltp_val = data.get("ltp") or data.get("lastPrice") or data.get("lp") or data.get("close") or ohlc.get("close")
                         if ltp_val and float(ltp_val) > 0:
                             return float(ltp_val)
                 except Exception:
