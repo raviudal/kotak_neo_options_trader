@@ -346,6 +346,9 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
               const isProfit = pnl >= 0;
               const isStrategyLtpSl = strat.sl_target_type === 'STRATEGY_LTP';
               const isBrokerSl = strat.sl_target_type === 'BROKER_SL' || String(strat.strategy_type || '').startsWith('NAKED');
+              const isNaked = String(strat.strategy_type || '').startsWith('NAKED') || (Array.isArray(strat.legs) && strat.legs.length === 1);
+              const nakedLeg = isNaked && Array.isArray(strat.legs) && strat.legs.length > 0 ? strat.legs[0] : null;
+              const nakedLegInfo = nakedLeg ? getLegLiveInfo(nakedLeg) : null;
               const currentStratLtp = getStrategyLiveLTP(strat);
               const isCloseToSL = !isBrokerSl && Math.abs(strat.distance_to_sl || 0) < (isStrategyLtpSl ? 10 : 25);
 
@@ -363,10 +366,34 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                           {strat.strategy_type}
                         </span>
                       </div>
-                      <p className="text-xs text-slate-500 mt-0.5 font-medium">
-                        Entry Spot: <span className="font-mono font-semibold text-slate-800">{strat.entry_index_price || 'N/A'}</span>
-                        {strat.hedge_distance ? ` • Hedge: ${strat.hedge_distance} pts` : ''}
-                      </p>
+                      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs text-slate-500 mt-1 font-medium">
+                        <span>
+                          Entry Spot: <span className="font-mono font-semibold text-slate-800">{strat.entry_index_price || 'N/A'}</span>
+                        </span>
+
+                        {isNaked && nakedLegInfo ? (
+                          <>
+                            <span className="text-slate-300">•</span>
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-800 font-mono text-xs">
+                              <span className="text-[10px] uppercase font-sans text-slate-500 font-bold">Option Entry:</span>
+                              <span className="font-bold">₹{nakedLegInfo.entryP.toFixed(2)}</span>
+                            </span>
+
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-900 font-mono text-xs">
+                              <span className="text-[10px] uppercase font-sans text-blue-600 font-bold">Option LTP:</span>
+                              <span className="font-bold text-blue-700">₹{nakedLegInfo.price > 0 ? nakedLegInfo.price.toFixed(2) : '--.--'}</span>
+                              {nakedLegInfo.isLive && (
+                                <span className="flex h-1.5 w-1.5 relative ml-0.5" title="Live WS Tick">
+                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                  <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                                </span>
+                              )}
+                            </span>
+                          </>
+                        ) : (
+                          strat.hedge_distance ? <span>• Hedge: {strat.hedge_distance} pts</span> : null
+                        )}
+                      </div>
 
                       {/* Payoff Metrics Pills */}
                       {(() => {
@@ -468,6 +495,34 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                           </span>
                         )}
                       </div>
+
+                      {/* Middle: Option Entry & LTP & Buffer for Naked Trades */}
+                      {nakedLegInfo && (
+                        <div className="flex items-center gap-2.5 flex-wrap font-mono text-xs">
+                          <span className="text-slate-600">
+                            Entry: <strong className="text-slate-900">₹{nakedLegInfo.entryP.toFixed(2)}</strong>
+                          </span>
+                          <span className="text-slate-300">•</span>
+                          <span className="text-slate-600 inline-flex items-center gap-1">
+                            LTP: <strong className="text-blue-700 font-bold">₹{nakedLegInfo.price > 0 ? nakedLegInfo.price.toFixed(2) : '--.--'}</strong>
+                            {nakedLegInfo.isLive && (
+                              <span className="flex h-1.5 w-1.5 relative" title="Live WS Tick">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                              </span>
+                            )}
+                          </span>
+                          {strat.strategy_sl_value > 0 && nakedLegInfo.price > 0 && (
+                            <>
+                              <span className="text-slate-300">•</span>
+                              <span className="bg-white border border-slate-200 px-1.5 py-0.5 rounded text-[11px] font-semibold text-slate-700">
+                                Buffer: {Math.abs(nakedLegInfo.price - strat.strategy_sl_value).toFixed(2)} pts
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      )}
+
                       <div className="text-[11px] text-slate-500 font-sans font-medium">
                         Directly managed by Kotak Neo RMS • No app tracking
                       </div>
@@ -948,12 +1003,19 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                       <div className="text-[11px] text-slate-500 font-medium flex items-center gap-2.5 flex-wrap">
                         <span>Type: <strong className="text-slate-700">{strat.strategy_type}</strong></span>
                         <span>Entry Spot: <strong className="font-mono text-slate-800">₹{strat.entry_index_price}</strong></span>
-                        <span className="bg-blue-50/90 border border-blue-200/90 px-2 py-0.5 rounded text-blue-900 font-mono text-[10px] sm:text-[11px]">
-                          Strategy Entry: <strong>{stratEntryPrice !== null ? `₹${stratEntryPrice.toFixed(2)}` : '—'}</strong>
-                        </span>
-                        <span className="bg-indigo-50/90 border border-indigo-200/90 px-2 py-0.5 rounded text-indigo-900 font-mono text-[10px] sm:text-[11px]">
-                          Strategy Exit: <strong>{stratExitPrice !== null ? `₹${stratExitPrice.toFixed(2)}` : '—'}</strong>
-                        </span>
+                        {(() => {
+                          const isNakedHist = String(strat.strategy_type || '').startsWith('NAKED') || (Array.isArray(strat.legs) && strat.legs.length === 1);
+                          return (
+                            <>
+                              <span className="bg-blue-50/90 border border-blue-200/90 px-2 py-0.5 rounded text-blue-900 font-mono text-[10px] sm:text-[11px]">
+                                {isNakedHist ? 'Option Entry:' : 'Strategy Entry:'} <strong>{stratEntryPrice !== null ? `₹${stratEntryPrice.toFixed(2)}` : '—'}</strong>
+                              </span>
+                              <span className="bg-indigo-50/90 border border-indigo-200/90 px-2 py-0.5 rounded text-indigo-900 font-mono text-[10px] sm:text-[11px]">
+                                {isNakedHist ? 'Option Exit:' : 'Strategy Exit:'} <strong>{stratExitPrice !== null ? `₹${stratExitPrice.toFixed(2)}` : '—'}</strong>
+                              </span>
+                            </>
+                          );
+                        })()}
                         <span>Stop Loss: <strong className="font-mono text-rose-600">{strat.index_sl_condition === 'LESS_THAN_OR_EQUAL' ? '≤' : '≥'} ₹{strat.index_sl_price}</strong></span>
                         <span>Net Premium: <strong className="font-mono text-slate-800">₹{strat.net_premium}</strong></span>
                       </div>
