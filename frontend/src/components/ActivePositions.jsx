@@ -59,6 +59,37 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
     }, 0);
   }, [todayHistoryStrategies]);
 
+  // 1-second local timer to keep candle countdown ticking smoothly in real-time
+  const [, setLocalClock] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLocalClock((c) => c + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Helper to compute live candle countdown seconds remaining aligned to market 9:15 AM
+  const getCandleRemainingSec = (strat) => {
+    const intervalMin = strat.candle_interval || 5;
+    const intervalSec = intervalMin * 60;
+    const now = new Date();
+    const marketOpen = new Date(now);
+    marketOpen.setHours(9, 15, 0, 0);
+
+    const elapsedSec = (now.getTime() - marketOpen.getTime()) / 1000;
+    let localRem = 0;
+    if (elapsedSec < 0) {
+      localRem = Math.max(0, Math.floor(-elapsedSec));
+    } else {
+      localRem = intervalSec - (Math.floor(elapsedSec) % intervalSec);
+    }
+
+    if (typeof strat.candle_time_remaining_sec === "number" && strat.candle_time_remaining_sec > 0) {
+      return strat.candle_time_remaining_sec;
+    }
+    return localRem;
+  };
+
   // Helper to compute live leg price and PnL using real-time WebSocket ticks
   const getLegLiveInfo = (leg) => {
     const tokenKey = String(leg.instrument_token || leg.token || "");
@@ -764,20 +795,23 @@ export default function ActivePositions({ liveStrategies, historicalStrategies, 
                     </div>
 
                     {/* Right: Candle Countdown Timer (if in CANDLE mode or STRATEGY_LTP) */}
-                    {(isStrategyLtpSl || strat.index_sl_mode === 'CANDLE') && (strat.candle_interval > 0 || isStrategyLtpSl) && (
-                      <div className="flex items-center gap-1.5">
-                        <Clock className="w-3 h-3 text-amber-600" />
-                        <span className="font-sans font-semibold text-slate-700">Candle:</span>
-                        <span className="font-bold text-slate-900 bg-white px-2 py-0.5 rounded border border-amber-200">
-                          {strat.candle_interval || 5}min
-                        </span>
-                        <span className={`px-2 py-0.5 rounded font-semibold border ${
-                          (strat.candle_time_remaining_sec || 0) < 30 ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-slate-800 border-amber-200'
-                        }`}>
-                          ⏱ {Math.floor((strat.candle_time_remaining_sec || 0) / 60)}:{String((strat.candle_time_remaining_sec || 0) % 60).padStart(2, '0')}
-                        </span>
-                      </div>
-                    )}
+                    {(isStrategyLtpSl || strat.index_sl_mode === 'CANDLE') && (strat.candle_interval > 0 || isStrategyLtpSl) && (() => {
+                      const remSec = getCandleRemainingSec(strat);
+                      return (
+                        <div className="flex items-center gap-1.5">
+                          <Clock className="w-3 h-3 text-amber-600" />
+                          <span className="font-sans font-semibold text-slate-700">Candle:</span>
+                          <span className="font-bold text-slate-900 bg-white px-2 py-0.5 rounded border border-amber-200">
+                            {strat.candle_interval || 5}min
+                          </span>
+                          <span className={`px-2 py-0.5 rounded font-semibold border ${
+                            remSec < 30 ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-slate-800 border-amber-200'
+                          }`}>
+                            ⏱ {Math.floor(remSec / 60)}:{String(remSec % 60).padStart(2, '0')}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   </div>
                   )}
 

@@ -426,7 +426,20 @@ def list_strategies(user: dict = Depends(get_current_user)):
             strat_dict = dict(r)
             cursor.execute("SELECT * FROM strategy_legs WHERE strategy_id = ?", (r["id"],))
             strat_dict["legs"] = [dict(leg) for leg in cursor.fetchall()]
-            result.append(_enrich_strategy_pnl(strat_dict))
+            enriched = _enrich_strategy_pnl(strat_dict)
+            if enriched.get("status") == "ACTIVE":
+                s_id = enriched.get("id")
+                sl_t = enriched.get("sl_target_type") or "INDEX"
+                is_c = (enriched.get("index_sl_mode") == "CANDLE") or (sl_t == "STRATEGY_LTP")
+                if is_c:
+                    iv = enriched.get("candle_interval") or 5
+                    cs = market_engine.candle_state.get(s_id)
+                    if cs and cs.get("candle_close_time"):
+                        enriched["candle_time_remaining_sec"] = max(0, int((cs["candle_close_time"] - datetime.now()).total_seconds()))
+                    else:
+                        next_c = market_engine._next_candle_close(iv)
+                        enriched["candle_time_remaining_sec"] = max(0, int((next_c - datetime.now()).total_seconds()))
+            result.append(enriched)
             
         return result
 

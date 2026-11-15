@@ -183,6 +183,24 @@ class MarketEngine:
                         "interval": iv,
                         "sl_target_type": sl_t
                     }
+
+            # Initialize candle state for any newly active CANDLE / STRATEGY_LTP strategies
+            for s_id, s_obj in new_cache.items():
+                sl_t = s_obj.get("sl_target_type") or "INDEX"
+                strat_t = str(s_obj.get("strategy_type") or "").upper()
+                if strat_t.startswith("NAKED") or sl_t in ["BROKER_SL", "NONE", "BROKER"]:
+                    continue
+                is_candle = (s_obj.get("index_sl_mode") == "CANDLE") or (sl_t == "STRATEGY_LTP")
+                if is_candle and s_id not in self.candle_state:
+                    iv = s_obj.get("candle_interval") or 5
+                    cur_p = self.calculate_strategy_ltp(s_obj) if sl_t == "STRATEGY_LTP" else self.nifty_spot
+                    self.candle_state[s_id] = {
+                        "last_price": cur_p,
+                        "candle_close_time": self._next_candle_close(iv),
+                        "candle_closed_price": None,
+                        "interval": iv,
+                        "sl_target_type": sl_t
+                    }
             logger.info("Loaded %d active strategies into memory", len(self.active_strategies))
 
     def calculate_strategy_ltp(self, strat: Dict[str, Any]) -> float:
@@ -238,23 +256,24 @@ class MarketEngine:
                 is_strat_sensex = ("SENSEX" in idx_sym) or ("SENSEX" in str(strat.get("name", "")).upper())
                 current_price = self.sensex_spot if is_strat_sensex else self.nifty_spot
             
-            if current_price <= 0:
-                continue
-            
+            # Ensure candle state exists so countdown timer always has candle_close_time
             state = self.candle_state.get(strat_id)
             if not state:
-                # Initialize candle state
-                self.candle_state[strat_id] = {
+                state = {
                     "last_price": current_price,
                     "candle_close_time": self._next_candle_close(interval),
                     "candle_closed_price": None,
                     "interval": interval,
                     "sl_target_type": sl_target
                 }
-                continue
-            
+                self.candle_state[strat_id] = state
+
             # Always track latest price
             state["last_price"] = current_price
+
+            # For INDEX mode, wait for valid market spot > 0 before evaluating candle close
+            if sl_target != "STRATEGY_LTP" and current_price <= 0:
+                continue
             
             # Check if candle has closed
             if now >= state["candle_close_time"]:
@@ -359,6 +378,8 @@ class MarketEngine:
                         self.symbol_ltp_cache[symbol] = ltp_val
                     if token:
                         self.symbol_ltp_cache[token] = ltp_val
+                    # Update candle state for STRATEGY_LTP strategies when option quotes update
+                    self._update_candle_state()
 
         except Exception as e:
             logger.error(f"Error handling Kotak WS message: {e}")
@@ -434,9 +455,22 @@ class MarketEngine:
                     distance_to_sl = round(self.nifty_spot - sl_price, 2) if s_data["index_sl_condition"] == "LESS_THAN_OR_EQUAL" else round(sl_price - self.nifty_spot, 2)
 
             candle_remaining = 0
-            cs = self.candle_state.get(s_id)
-            if cs and cs.get("candle_close_time"):
-                candle_remaining = max(0, int((cs["candle_close_time"] - datetime.now()).total_seconds()))
+            is_candle_mode = (sl_target == "STRATEGY_LTP") or (s_data.get("index_sl_mode") == "CANDLE")
+            if is_candle_mode:
+                cs = self.candle_state.get(s_id)
+                if cs and cs.get("candle_close_time"):
+                    candle_remaining = max(0, int((cs["candle_close_time"] - datetime.now()).total_seconds()))
+                else:
+                    iv = s_data.get("candle_interval") or 5
+                    next_close = self._next_candle_close(iv)
+                    candle_remaining = max(0, int((next_close - datetime.now()).total_seconds()))
+                    self.candle_state[s_id] = {
+                        "last_price": strategy_ltp if sl_target == "STRATEGY_LTP" else self.nifty_spot,
+                        "candle_close_time": next_close,
+                        "candle_closed_price": None,
+                        "interval": iv,
+                        "sl_target_type": sl_target
+                    }
 
             live_strats.append({
                 "id": s_id,
@@ -720,6 +754,8 @@ class MarketEngine:
         while self.is_running:
             try:
                 loop_counter += 1
+                # Continuously service candle states & countdowns
+                self._update_candle_state()
                 # Fetch live Nifty quote and active/preview option legs every 1 second from Kotak Neo API
                 if loop_counter % 2 == 0:
                     from backend.kotak_service import KotakNeoManager
